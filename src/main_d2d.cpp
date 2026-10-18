@@ -41,6 +41,7 @@
 #include <thread>
 #pragma comment(lib, "winhttp.lib")
 #include "input.h"
+#include "touch_pan.h"
 #include "editor.h"
 #include "print.h"
 #include "export.h"
@@ -51,6 +52,46 @@
 #pragma comment(lib, "dbghelp.lib")
 
 static App* g_app = nullptr;
+
+// Windows can promote touchscreen taps/pans into compatibility mouse events.
+// A pan must not turn into a selection or a link activation on release.
+struct TouchPanState {
+    bool active = false;
+    bool swallowTouchMouseUp = false;
+    int previousScreenY = 0;
+};
+static TouchPanState g_touchPan;
+
+static bool touchGeneratedMouseMessage() {
+    constexpr ULONG_PTR kSignatureMask = 0xFFFFFF00u;
+    constexpr ULONG_PTR kTouchSignature = 0xFF515700u;
+    return (static_cast<ULONG_PTR>(GetMessageExtraInfo()) & kSignatureMask)
+        == kTouchSignature;
+}
+
+static bool canPanReaderAt(const App& app, HWND hwnd, POINT screen) {
+    POINT p = screen;
+    if (!ScreenToClient(hwnd, &p)) return false;
+    if (p.x < 0 || p.x >= app.width || p.y < 0 || p.y >= app.height) return false;
+    if (static_cast<float>(p.y) < chromeTopHeight(app)) return false;
+    // Read-only document surface only. Let the existing input handlers own
+    // editing, menus, overlays, and all popup panels.
+    if (app.editMode || app.showHelp || app.showSettings ||
+        app.showPrintPreview || app.showLightbox || app.showThemeEditor ||
+        app.showContextMenu || app.showTabMenu || app.contentHeight <= app.height) {
+        return false;
+    }
+    if (app.showFolderBrowser) {
+        const auto panel = folderBrowserMetrics(app);
+        if (p.x >= panel.cardLeft && p.x <= panel.cardRight &&
+            p.y >= panel.cardTop && p.y <= panel.cardBottom) return false;
+    }
+    if (app.showToc) {
+        const auto r = tocListRect(app);
+        if (p.x >= r.left && p.x <= r.right) return false;
+    }
+    return true;
+}
 
 // Initializes the GPU driver on a worker thread after the first (software)
 // frame is on screen. D3D device creation costs ~200 ms dominated by
@@ -1240,6 +1281,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     App* app = g_app;
 
     switch (msg) {
+        case WM_CREATE: {
+            // Track one finger vertically without kinetic flings. The OS
+            // recognizer handles the pan threshold; our code applies only
+            // physical finger displacement (with bounded per-event deltas).
+            GESTURECONFIG gc = {
+                GID_PAN,
+                GC_PAN | GC_PAN_WITH_SINGLE_FINGER_VERTICALLY,
+                GC_PAN_WITH_INERTIA | GC_PAN_WITH_GUTTER
+            };
+            SetGestureConfig(hwnd, 0, 1, &gc, sizeof(gc));
+            return 0;
+        }
+
         case WM_NCCALCSIZE: {
             // Reclaim the caption: the title bar becomes the tab strip.
             // DefWindowProc computes the resize borders, then the top edge
@@ -1309,6 +1363,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
 
         case WM_KILLFOCUS:
+            g_touchPan.active = false;
+            g_touchPan.swallowTouchMouseUp = false;
             if (app) tabHoverCardDismiss(*app, hwnd);
             if (app) searchInputMouseUp(*app);
             if (app) cancelDocumentScrollbarDrag(*app, hwnd);
@@ -1505,6 +1561,60 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
+        case WM_GESTURE: {
+            auto handle = reinterpret_cast<HGESTUREINFO>(lParam);
+            GESTUREINFO info{};
+            info.cbSize = sizeof(info);
+            if (!GetGestureInfo(handle, &info))
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (info.dwID == GID_PAN && app) {
+                if (info.dwFlags & GF_BEGIN) {
+                    POINT screen{info.ptsLocation.x, info.ptsLocation.y};
+                    g_touchPan.active = canPanReaderAt(*app, hwnd, screen);
+                    g_touchPan.previousScreenY = info.ptsLocation.y;
+                    if (g_touchPan.active) {
+                        g_touchPan.swallowTouchMouseUp = true;
+                        // The emulated mouse-down may have armed selection.
+                        app->mouseDown = false;
+                        app->selecting = false;
+                        app->selAutoScrollVel = 0.0f;
+                        KillTimer(hwnd, TIMER_SELECT_SCROLL);
+                        if (GetCapture() == hwnd) ReleaseCapture();
+                    }
+                }
+                const bool handled = g_touchPan.active;
+                if (handled && !(info.dwFlags & (GF_BEGIN | GF_END | GF_INERTIA))) {
+                    const float dy = static_cast<float>(info.ptsLocation.y) -
+                                     static_cast<float>(g_touchPan.previousScreenY);
+                    app->scrollY = tinta_touch::applyPan(
+                        app->scrollY, dy, app->contentHeight,
+                        static_cast<float>(app->height));
+                    app->targetScrollY = app->scrollY;
+                    // A link preview anchored to the old scroll position
+                    // must not float over newly scrolled content.
+                    if (app->linkPeekActive || !app->linkPeekUrl.empty()) {
+                        app->linkPeekActive = false;
+                        app->linkPeekUrl.clear();
+                        if (app->linkPeekBitmap) {
+                            app->linkPeekBitmap->Release();
+                            app->linkPeekBitmap = nullptr;
+                        }
+                        KillTimer(hwnd, TIMER_LINK_PEEK);
+                    }
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+                g_touchPan.previousScreenY = info.ptsLocation.y;
+                if (info.dwFlags & GF_END) g_touchPan.active = false;
+                if (handled) {
+                    CloseGestureInfoHandle(handle);
+                    return 0;
+                }
+            }
+            // Let Windows handle non-pan gestures and gestures over controls.
+            // DefWindowProc owns their gesture-info handles.
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
+
         case WM_MOUSEWHEEL:
             if (app) handleMouseWheel(*app, hwnd, wParam, lParam);
             return 0;
@@ -1514,14 +1624,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_MOUSEMOVE:
+            if (g_touchPan.active && touchGeneratedMouseMessage()) return 0;
             if (app) handleMouseMove(*app, hwnd, lParam);
             return 0;
 
         case WM_LBUTTONDOWN:
+            // The next distinct tap must never inherit a previous swipe's
+            // suppression flag.
+            if (touchGeneratedMouseMessage() && !g_touchPan.active)
+                g_touchPan.swallowTouchMouseUp = false;
             if (app) handleMouseDown(*app, hwnd, wParam, lParam);
             return 0;
 
         case WM_LBUTTONUP:
+            if (g_touchPan.swallowTouchMouseUp && touchGeneratedMouseMessage()) {
+                g_touchPan.swallowTouchMouseUp = false;
+                return 0;
+            }
             if (app) handleMouseUp(*app, hwnd, wParam, lParam);
             return 0;
 
@@ -1567,6 +1686,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_CANCELMODE:
+            g_touchPan.active = false;
+            g_touchPan.swallowTouchMouseUp = false;
             if (app) cancelAppMenuPress(*app, hwnd);
             if (app) tableEditMouseUp(*app);
             if (app) searchInputMouseUp(*app);

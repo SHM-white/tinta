@@ -159,6 +159,10 @@ target_compile_definitions(tinta PRIVATE UNICODE _UNICODE
     TINTA_VERSION_PATCH=${PROJECT_VERSION_PATCH})
 
 if(BUILD_TESTING)
+    add_executable(touch_pan_tests tests/touch_pan_tests.cpp)
+    target_include_directories(touch_pan_tests PRIVATE include)
+    add_test(NAME touch_pan_bounds COMMAND touch_pan_tests)
+
     add_executable(keymap_tests tests/keymap_tests.cpp src/keymap.cpp)
     target_include_directories(keymap_tests PRIVATE include)
     add_test(NAME keymap COMMAND keymap_tests)
