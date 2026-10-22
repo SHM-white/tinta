@@ -1,0 +1,234 @@
+#include "d2d_init.h"
+#include "render.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cwchar>
+#include <fstream>
+#include <iostream>
+#include <memory>
+
+namespace {
+int failures = 0;
+std::string scenario;
+void check(bool value, const char* message) {
+    if (!value) { std::cerr << "FAIL: " << scenario << ": " << message << '\n'; ++failures; }
+}
+bool closeEnough(float a, float b) { return std::abs(a - b) < 0.1f; }
+using qmd::Element;
+using qmd::ElementPtr;
+using qmd::ElementType;
+
+ElementPtr node(ElementType type, std::vector<ElementPtr> children = {}, const char* text = "") {
+    auto result = std::make_shared<Element>(type);
+    result->children = std::move(children);
+    result->text = text;
+    for (const auto& child : result->children) child->parent = result.get();
+    return result;
+}
+ElementPtr text(const char* value) { return node(ElementType::Text, {}, value); }
+ElementPtr paragraph(const char* value) { return node(ElementType::Paragraph, {text(value)}); }
+
+const App::LayoutTextRun* runFor(const App& app, const wchar_t* value) {
+    const size_t offset = app.docText.find(value);
+    if (offset != std::wstring::npos) {
+        for (const auto& run : app.layoutTextRuns)
+            if (run.docLength && run.docStart <= offset && offset < run.docStart + run.docLength) return &run;
+    }
+    return nullptr;
+}
+void checkOrder(const App& app, std::initializer_list<const wchar_t*> values) {
+    size_t previous = 0;
+    float previousY = -1;
+    for (const auto* value : values) {
+        const size_t offset = app.docText.find(value);
+        check(offset != std::wstring::npos && offset >= previous, "searchable text follows source order");
+        check(offset == std::wstring::npos || app.docText.find(value, offset + 1) == std::wstring::npos,
+              "content occurs exactly once");
+        if (offset != std::wstring::npos) previous = offset + std::wcslen(value);
+        const auto* run = runFor(app, value);
+        if (!run || run->bounds.top < previousY) {
+            std::wcerr << L"  ordering token: " << value << L", y=" << (run ? run->bounds.top : -1)
+                       << L", previous y=" << previousY << L'\n';
+        }
+        check(run && run->bounds.top >= previousY, "visible text follows source order");
+        if (run) previousY = run->bounds.top;
+    }
+}
+void checkTable(const App& app) {
+    check(app.tableRects.size() == 1, "table reaches native table layout");
+    if (app.tableRects.size() != 1) return;
+    // Detailed grid and wrapping checks live in table_layout_tests.cpp.
+    const auto& table = app.tableRects[0];
+    check(table.tsv == L"Header left\tHeader right\nCell alpha\tCell beta\nCell gamma\tCell delta",
+          "table copy retains every row and column");
+    const auto* left = runFor(app, L"Cell alpha");
+    const auto* right = runFor(app, L"Cell beta");
+    const auto* lower = runFor(app, L"Cell gamma");
+    check(left && right && lower && left->pos.x < right->pos.x && closeEnough(left->pos.y, right->pos.y) && lower->pos.y > left->pos.y,
+          "cells occupy distinct native rows and columns");
+}
+void checkFixtureTree(const ElementPtr& root) {
+    check(root && root->children.size() > 2, "fixture has surrounding blocks");
+    if (!root || root->children.size() <= 2) return;
+    const auto& list = root->children[2];
+    check(list->type == ElementType::List && list->ordered && list->start == 7 && list->children.size() == 2,
+          "MD4C recognizes ordered start and two items");
+    if (list->type != ElementType::List || list->children.empty()) return;
+    const auto& children = list->children[0]->children;
+    const std::vector<ElementType> expected = {ElementType::Paragraph, ElementType::Table, ElementType::Paragraph,
+        ElementType::Heading, ElementType::Paragraph, ElementType::HorizontalRule, ElementType::Paragraph,
+        ElementType::BlockQuote, ElementType::CodeBlock, ElementType::List, ElementType::Paragraph};
+    check(children.size() == expected.size(), "MD4C keeps all mixed list blocks");
+    for (size_t i = 0; i < children.size() && i < expected.size(); ++i)
+        check(children[i]->type == expected[i], "MD4C preserves block types in source order");
+}
+void checkFixture(const App& app) {
+    checkOrder(app, {L"Before table paragraph", L"Header left", L"Header right", L"Cell alpha", L"Cell beta",
+        L"Cell gamma", L"Cell delta", L"After table paragraph", L"Item heading", L"After heading paragraph",
+        L"After rule paragraph", L"Quoted paragraph", L"fenced sample", L"Nested first", L"Nested deeper",
+        L"Nested last", L"Final item paragraph", L"Next numbered item", L"Ordinary lists", L"Ordinary item",
+        L"Parent item", L"Child item", L"Last bullet", L"Pending task", L"Completed task", L"Surrounding quote",
+        L"surrounding code", L"Final surrounding paragraph"});
+    checkTable(app);
+    const float scale = app.contentScale * app.zoomFactor;
+    const auto* before = runFor(app, L"Before table paragraph");
+    const auto* after = runFor(app, L"After table paragraph");
+    if (before && after && app.tableRects.size() == 1) {
+        check(before->bounds.bottom <= app.tableRects[0].bounds.top && after->bounds.top >= app.tableRects[0].bounds.bottom,
+              "table remains between the surrounding paragraphs");
+        check(closeEnough(before->pos.x, app.layoutIndent + 24 * scale) && closeEnough(after->pos.x, before->pos.x) &&
+              closeEnough(app.tableRects[0].bounds.left, before->pos.x), "paragraphs and table share list indentation");
+        check(std::any_of(app.layoutTextRuns.begin(), app.layoutTextRuns.end(), [&](const auto& run) {
+            return !run.docLength && closeEnough(run.pos.x, app.layoutIndent) && closeEnough(run.pos.y, before->pos.y);
+        }), "first paragraph starts beside its list marker");
+    }
+    const auto* nested = runFor(app, L"Nested first");
+    const auto* deeper = runFor(app, L"Nested deeper");
+    check(nested && deeper && closeEnough(nested->pos.x, app.layoutIndent + 48 * scale) &&
+          closeEnough(deeper->pos.x, app.layoutIndent + 72 * scale), "nested lists retain each indentation level");
+    check(app.taskRects.size() == 2 && !app.taskRects[0].checked && app.taskRects[1].checked,
+          "task checkboxes retain checked state");
+    const wchar_t* tasks[] = {L"Pending task", L"Completed task"};
+    for (size_t i = 0; i < app.taskRects.size() && i < std::size(tasks); ++i) {
+        const auto* task = runFor(app, tasks[i]);
+        const auto& hit = app.taskRects[i].rect;
+        check(task && closeEnough(task->pos.x, app.layoutIndent + 24 * scale) &&
+              closeEnough(hit.top, task->pos.y) && hit.left <= app.layoutIndent &&
+              hit.right > app.layoutIndent && hit.right < task->pos.x && hit.bottom > hit.top,
+              "task hit regions align beside their item text");
+    }
+    const auto* quote = runFor(app, L"Quoted paragraph");
+    check(quote && quote->pos.x > app.layoutIndent + 24 * scale &&
+          std::any_of(app.layoutRects.begin(), app.layoutRects.end(), [&](const auto& rect) {
+              return closeEnough(rect.rect.left, app.layoutIndent + 24 * scale) &&
+                     closeEnough(rect.rect.right - rect.rect.left, 4) &&
+                     rect.rect.top <= quote->bounds.top && rect.rect.bottom >= quote->bounds.bottom;
+          }), "list-contained quote retains its inset and bar");
+    check(app.codeBlocks.size() == 2 && app.headings.size() == 3, "fences and nested headings keep block layout");
+    const auto* ruleBefore = runFor(app, L"After heading paragraph");
+    const auto* ruleAfter = runFor(app, L"After rule paragraph");
+    check(ruleBefore && ruleAfter && std::any_of(app.layoutLines.begin(), app.layoutLines.end(), [&](const auto& line) {
+        return closeEnough(line.p1.x, app.layoutIndent + 24 * scale) && closeEnough(line.p1.y, line.p2.y) &&
+               line.p1.y > ruleBefore->bounds.bottom && line.p1.y < ruleAfter->bounds.top;
+    }), "horizontal rule remains between its surrounding paragraphs");
+    const size_t ordinary = app.docText.find(L"Ordinary item");
+    const size_t parent = app.docText.find(L"Parent item");
+    int ordinaryLines = 0;
+    for (const auto& run : app.layoutTextRuns) {
+        if (run.docLength && run.docStart >= ordinary && run.docStart < parent) {
+            ++ordinaryLines;
+            check(closeEnough(run.pos.x, app.layoutIndent + 24 * scale), "wrapped lines keep hanging indentation");
+        }
+    }
+    if (app.width == 650) check(ordinaryLines > 1, "narrow fixture exercises list wrapping");
+}
+
+void syntheticCases(App& app) {
+    // The loose fixture uses paragraphs; direct inline children exercise
+    // buffering across a block and the final flush without relying on MD4C.
+    auto inlineItem = node(ElementType::ListItem, {
+        text("Inline before"), node(ElementType::Strong, {text(" bold")}),
+        node(ElementType::Table, {node(ElementType::TableRow, {node(ElementType::TableCell, {text("Middle cell")})})}),
+        text("Inline after")});
+    auto blockFirstItem = node(ElementType::ListItem, {
+        node(ElementType::Table, {node(ElementType::TableRow, {node(ElementType::TableCell, {text("First cell")})})}),
+        paragraph("Block first after")});
+    app.root = node(ElementType::Document, {node(ElementType::List, {inlineItem, blockFirstItem})});
+    layoutDocument(app);
+    checkOrder(app, {L"Inline before", L"bold", L"Middle cell", L"Inline after", L"First cell", L"Block first after"});
+    const auto* before = runFor(app, L"Inline before");
+    const auto* bold = runFor(app, L"bold");
+    check(before && bold && closeEnough(before->pos.y, bold->pos.y) && bold->pos.x >= before->bounds.right,
+          "consecutive styled inline children share a line");
+    check(app.tableRects.size() == 2, "inline/block alternation and table-first item retain native tables");
+    if (app.tableRects.size() != 2) return;
+    const auto* after = runFor(app, L"Inline after");
+    check(before && after && before->bounds.bottom <= app.tableRects[0].bounds.top &&
+          after->bounds.top >= app.tableRects[0].bounds.bottom, "direct inline content brackets the table visually");
+    const auto* blockFirstAfter = runFor(app, L"Block first after");
+    check(blockFirstAfter && blockFirstAfter->bounds.top >= app.tableRects[1].bounds.bottom,
+          "table-first item keeps its paragraph below the table");
+}
+
+void ordinaryCases(App& app) {
+    const float scale = app.contentScale * app.zoomFactor;
+    for (bool loose : {false, true}) {
+        auto parsed = app.parser.parse(loose ? "7. First\n\n8. Second\n" : "7. First\n8. Second\n");
+        check(parsed.success, "ordinary list parses");
+        app.root = parsed.root;
+        layoutDocument(app);
+        const auto* first = runFor(app, L"First");
+        const auto* second = runFor(app, L"Second");
+        check(first && second, "both ordinary items render");
+        if (!first || !second) continue;
+        check(closeEnough(second->pos.y - first->pos.y, loose ? std::max(28 * scale, first->bounds.bottom - first->bounds.top + 14 * scale) : 28 * scale),
+              "tight and loose lists retain item spacing");
+        int markers = 0;
+        for (const auto& run : app.layoutTextRuns) {
+            if (run.docLength) continue;
+            check(closeEnough(run.pos.x, app.layoutIndent) &&
+                  closeEnough(run.pos.y, markers == 0 ? first->pos.y : second->pos.y),
+                  "ordinary markers align beside their item text");
+            ++markers;
+        }
+        check(markers == 2, "two numbered markers render");
+    }
+}
+
+}
+
+int main() {
+    {
+        auto state = std::make_unique<App>();
+        auto& app = *state;
+        if (!initD2D(app)) return 2;
+        app.height = 900;
+        app.readingWidthPct = 100;
+        std::ifstream file(TINTA_LIST_FIXTURE, std::ios::binary);
+        check(file.good(), "mixed fixture opens");
+        const std::string source((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        auto parsed = app.parser.parse(source);
+        check(parsed.success, "mixed fixture parses");
+        checkFixtureTree(parsed.root);
+        for (int theme : {0, 5}) {
+            applyTheme(app, theme);
+            for (float scale : {1.0f, 1.5f}) {
+                app.contentScale = scale;
+                updateTextFormats(app);
+                for (int width : {1050, 650}) {
+                    app.width = width;
+                    scenario = "theme" + std::to_string(theme) + "-scale" + std::to_string(static_cast<int>(scale * 100)) + "-width" + std::to_string(width);
+                    app.root = parsed.root;
+                    layoutDocument(app);
+                    checkFixture(app);
+                    syntheticCases(app);
+                    ordinaryCases(app);
+                }
+            }
+        }
+    }
+    CoUninitialize();
+    std::cout << "List block order: " << failures << " failures\n";
+    return failures ? 1 : 0;
+}
