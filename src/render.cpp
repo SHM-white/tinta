@@ -2765,6 +2765,36 @@ static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float i
     app.layoutRects.push_back({D2D1::RectF(indent, startY, indent + 4, std::min(y, contentBottom)), barColor});
 }
 
+static bool isListInlineElement(ElementType type) {
+    switch (type) {
+        case ElementType::Text:
+        case ElementType::Code:
+        case ElementType::Emphasis:
+        case ElementType::Strong:
+        case ElementType::Link:
+        case ElementType::Image:
+        case ElementType::SoftBreak:
+        case ElementType::HardBreak:
+        case ElementType::Ruby:
+        case ElementType::RubyText:
+        case ElementType::Anchor:
+        case ElementType::FootnoteReference:
+        case ElementType::FootnoteBacklink:
+        case ElementType::Highlight:
+        case ElementType::Superscript:
+        case ElementType::Subscript:
+        case ElementType::Strikethrough:
+        case ElementType::Underline:
+        case ElementType::MathInline:
+            return true;
+        case ElementType::MathDisplay:
+            // Tight lists expose $$...$$ directly; route it through inline layout.
+            return true;
+        default:
+            return false;
+    }
+}
+
 static void layoutList(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     float scale = app.contentScale * app.zoomFactor;
     float listIndent = 24.0f * scale;
@@ -2827,44 +2857,28 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
             addTextRun(app, std::move(info), pos, bounds, app.theme.text, 0, 0, false);
         }
 
-        bool hasBlockChildren = false;
+        float itemStartY = y;
+
+        // MD4C omits paragraph wrappers in tight lists.
+        // Hence list items can mix direct inline children with block children.
+        std::vector<ElementPtr> inlineElements;
         for (const auto& itemChild : child->children) {
-            if (itemChild->type == ElementType::Paragraph ||
-                itemChild->type == ElementType::List ||
-                itemChild->type == ElementType::CodeBlock ||
-                itemChild->type == ElementType::BlockQuote) {
-                hasBlockChildren = true;
-                break;
+            if (isListInlineElement(itemChild->type)) {
+                inlineElements.push_back(itemChild);
+            } else {
+                if (!inlineElements.empty()) {
+                    layoutInlineContent(app, inlineElements, indent + listIndent, y,
+                        maxWidth - listIndent, app.textFormat, app.theme.text);
+                    inlineElements.clear();
+                    // The item's text ends its line before a nested list, as
+                    // on screen (a copy read "Water it.morning")
+                    app.docText += L"\n";
+                }
+                layoutElement(app, itemChild, y, indent + listIndent, maxWidth - listIndent);
             }
         }
-
-        float itemStartY = y;
-        if (hasBlockChildren) {
-            std::vector<ElementPtr> inlineElements, blockElements;
-            for (const auto& itemChild : child->children) {
-                if (itemChild->type == ElementType::Paragraph ||
-                    itemChild->type == ElementType::List ||
-                    itemChild->type == ElementType::CodeBlock ||
-                    itemChild->type == ElementType::BlockQuote) {
-                    blockElements.push_back(itemChild);
-                } else {
-                    inlineElements.push_back(itemChild);
-                }
-            }
-
-            if (!inlineElements.empty()) {
-                layoutInlineContent(app, inlineElements, indent + listIndent, y,
-                    maxWidth - listIndent, app.textFormat, app.theme.text);
-                // The item's text ends its line before a nested list, as
-                // on screen (a copy read "Water it.morning")
-                app.docText += L"\n";
-            }
-
-            for (const auto& blockChild : blockElements) {
-                layoutElement(app, blockChild, y, indent + listIndent, maxWidth - listIndent);
-            }
-        } else {
-            layoutInlineContent(app, child->children, indent + listIndent, y,
+        if (!inlineElements.empty()) {
+            layoutInlineContent(app, inlineElements, indent + listIndent, y,
                 maxWidth - listIndent, app.textFormat, app.theme.text);
         }
 
