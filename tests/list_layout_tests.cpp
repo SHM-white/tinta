@@ -88,7 +88,15 @@ void checkFixture(const App& app) {
         L"Cell gamma", L"Cell delta", L"After table paragraph", L"Item heading", L"After heading paragraph",
         L"After rule paragraph", L"Quoted paragraph", L"fenced sample", L"Nested first", L"Nested deeper",
         L"Nested last", L"Final item paragraph", L"Next numbered item", L"Ordinary lists", L"Ordinary item",
-        L"Parent item", L"Child item", L"Last bullet", L"Pending task", L"Completed task", L"Surrounding quote",
+        L"Parent item", L"Child item", L"Last bullet", L"Pending task", L"Completed task",
+        L"Unordered HTML alpha", L"Unordered HTML beta", L"After the omitted HTML end tags.",
+        L"Ordered HTML alpha", L"Ordered HTML beta", L"After the ordered HTML list.",
+        L"Outer alpha", L"Inner alpha", L"Inner beta", L"Outer beta", L"After the nested HTML lists.",
+        L"HTML heading first", L"HTML heading body.", L"HTML following item",
+        L"Ordered heading first", L"Paragraph-first ordered control.", L"Ordered level one heading",
+        L"Ordered level six heading", L"Following the ordered headings.", L"Unordered heading first",
+        L"Paragraph-first unordered control.", L"Unordered level one heading", L"Unordered level six heading",
+        L"Following the unordered headings.", L"Surrounding quote",
         L"surrounding code", L"Final surrounding paragraph"});
     checkTable(app);
     const float scale = app.contentScale * app.zoomFactor;
@@ -125,7 +133,7 @@ void checkFixture(const App& app) {
                      closeEnough(rect.rect.right - rect.rect.left, 4) &&
                      rect.rect.top <= quote->bounds.top && rect.rect.bottom >= quote->bounds.bottom;
           }), "list-contained quote retains its inset and bar");
-    check(app.codeBlocks.size() == 2 && app.headings.size() == 3, "fences and nested headings keep block layout");
+    check(app.codeBlocks.size() == 2 && app.headings.size() == 11, "mixed headings and fences keep block layout");
     const auto* ruleBefore = runFor(app, L"After heading paragraph");
     const auto* ruleAfter = runFor(app, L"After rule paragraph");
     check(ruleBefore && ruleAfter && std::any_of(app.layoutLines.begin(), app.layoutLines.end(), [&](const auto& line) {
@@ -171,6 +179,70 @@ void syntheticCases(App& app) {
           "table-first item keeps its paragraph below the table");
 }
 
+float baseline(const App::LayoutTextRun& run) {
+    DWRITE_LINE_METRICS metrics{};
+    UINT32 count = 0;
+    check(SUCCEEDED(run.layout->GetLineMetrics(&metrics, 1, &count)) && count == 1,
+          "first-line baseline is measurable");
+    return run.pos.y + metrics.baseline;
+}
+
+void firstBlockCases(App& app) {
+    auto html = app.parser.parse("<ul><li>a<li>b</ul>\n<p>after</p>\n");
+    check(html.success, "omitted-end-tag HTML parses");
+    app.root = html.root;
+    layoutDocument(app);
+    const size_t a = app.docText.find(L"a"), b = app.docText.find(L"b"), after = app.docText.find(L"after");
+    check(a < b && b < after && after != std::wstring::npos, "omitted-end-tag HTML keeps both items searchable in order");
+    check(runFor(app, L"a") && runFor(app, L"b") && runFor(app, L"after"),
+          "omitted-end-tag HTML keeps both items visible");
+
+    const float scale = app.contentScale * app.zoomFactor;
+    const std::string title = "Heading first with enough words to wrap across lines at narrow widths while retaining native heading formatting";
+    for (const std::string prefix : {"1. ", "- "}) {
+        for (int level : {1, 3, 6}) {
+            // A leading script must not pull the marker above the heading's main baseline.
+            const std::string heading = std::string(level, '#') + (level == 6 ? " ^up^ " : " ") + title + "\n\n";
+            auto doc = app.parser.parse(prefix + heading + "Following paragraph.\n");
+            check(doc.success && doc.root && doc.root->children.size() == 2 && doc.root->children[0]->type == ElementType::List &&
+                  doc.root->children[1]->type == ElementType::Paragraph,
+                  "heading-first Markdown parses as a list");
+            if (!doc.success || !doc.root || doc.root->children.empty() ||
+                doc.root->children[0]->type != ElementType::List || doc.root->children[0]->children.empty()) continue;
+            const auto& item = doc.root->children[0]->children[0];
+            check(item->children.size() == 1 && item->children[0]->type == ElementType::Heading &&
+                  item->children[0]->level == level,
+                  "heading-first item retains its native heading node");
+            app.root = doc.root;
+            layoutDocument(app);
+            const auto* text = runFor(app, L"Heading first");
+            const auto* following = runFor(app, L"Following paragraph.");
+            auto marker = std::find_if(app.layoutTextRuns.begin(), app.layoutTextRuns.end(), [](const auto& run) {
+                return !run.docLength;
+            });
+            check(app.headings.size() == 1 && text && following && marker != app.layoutTextRuns.end(),
+                  "heading-first item renders a native heading, marker and following paragraph");
+            if (!text || !following || marker == app.layoutTextRuns.end()) continue;
+            const float delta = baseline(*text) - baseline(*marker);
+            check(closeEnough(delta, 0), "heading-first marker shares the heading's first-line baseline");
+            float size = 0;
+            text->layout->GetFontSize(0, &size);
+            check(closeEnough(size, app.headingFormats[level - 1]->GetFontSize()), "heading-first text retains its heading font size");
+            const float headingY = text->bounds.top, followingY = following->bounds.top;
+            const int width = app.width;
+            app.width -= static_cast<int>(24 * scale);
+            app.root = app.parser.parse(heading + "Following paragraph.\n").root;
+            layoutDocument(app);
+            const auto* standalone = runFor(app, L"Heading first");
+            const auto* standaloneAfter = runFor(app, L"Following paragraph.");
+            check(standalone && standaloneAfter && closeEnough(standalone->bounds.top, headingY) &&
+                  closeEnough(standaloneAfter->bounds.top + 8 * scale, followingY),
+                  "heading-first list preserves native heading margins, wrapping and trailing list gap");
+            app.width = width;
+        }
+    }
+}
+
 void ordinaryCases(App& app) {
     const float scale = app.contentScale * app.zoomFactor;
     for (bool loose : {false, true}) {
@@ -188,7 +260,8 @@ void ordinaryCases(App& app) {
         for (const auto& run : app.layoutTextRuns) {
             if (run.docLength) continue;
             check(closeEnough(run.pos.x, app.layoutIndent) &&
-                  closeEnough(run.pos.y, markers == 0 ? first->pos.y : second->pos.y),
+                  closeEnough(run.pos.y, markers == 0 ? first->pos.y : second->pos.y) &&
+                  closeEnough(baseline(run), baseline(markers == 0 ? *first : *second)),
                   "ordinary markers align beside their item text");
             ++markers;
         }
@@ -224,6 +297,7 @@ int main() {
                     checkFixture(app);
                     syntheticCases(app);
                     ordinaryCases(app);
+                    firstBlockCases(app);
                 }
             }
         }

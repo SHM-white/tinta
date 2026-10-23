@@ -2809,6 +2809,7 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
     for (const auto& child : elem->children) {
         if (child->type != ElementType::ListItem) continue;
 
+        size_t markerIndex = SIZE_MAX;
         size_t listItem = app.docListItems.size();
         app.docListItems.push_back({app.docText.size(), app.docText.size(), listDepth - 1,
                                     elem->ordered, itemNum,
@@ -2854,9 +2855,11 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
             LayoutInfo info = createLayout(app, marker, app.textFormat, 24.0f, app.bodyTypography);
             D2D1_POINT_2F pos = D2D1::Point2F(indent, y);
             D2D1_RECT_F bounds = D2D1::RectF(indent, y, indent + listIndent, y + 24);
+            if (info.layout) markerIndex = app.layoutTextRuns.size();
             addTextRun(app, std::move(info), pos, bounds, app.theme.text, 0, 0, false);
         }
 
+        const size_t headingStart = app.headings.size();
         float itemStartY = y;
 
         // MD4C omits paragraph wrappers in tight lists.
@@ -2880,6 +2883,19 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
         if (!inlineElements.empty()) {
             layoutInlineContent(app, inlineElements, indent + listIndent, y,
                 maxWidth - listIndent, app.textFormat, app.theme.text);
+        }
+
+        if (markerIndex < app.layoutTextRuns.size() && headingStart < app.headings.size() &&
+            !child->children.empty() && child->children.front()->type == ElementType::Heading) {
+            // Move only the marker: keep heading margins and align to the main
+            // text baseline, even when the heading starts with a raised script.
+            auto& marker = app.layoutTextRuns[markerIndex];
+            auto format = app.headingFormats[child->children.front()->level - 1];
+            float headingBaseline = app.headings[headingStart].y + formatBaseline(app, format ? format : app.textFormat);
+            float shift = headingBaseline - marker.pos.y - layoutBaseline(marker.layout);
+            marker.pos.y += shift;
+            marker.bounds.top += shift;
+            marker.bounds.bottom += shift;
         }
 
         if (listItem < app.docListItems.size()) app.docListItems[listItem].end = app.docText.size();
