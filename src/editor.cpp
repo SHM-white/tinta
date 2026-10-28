@@ -319,6 +319,125 @@ size_t editorTopVisibleLine(App& app) {
     return row;
 }
 
+// The other way round from syncPreviewToEditor: the editor scrolls to the
+// source line at the preview's top, and the next sync keeps the preview
+// there. A drag on the preview's scrollbar moves both panes (#280), as the
+// wheel over the preview does.
+void editorFollowPreview(App& app) {
+    if (!editorPreviewVisible(app) || app.editorReadingPreview || app.scrollAnchors.empty() ||
+        app.editorLineByteOffsets.empty() || app.editorLineStarts.empty()) {
+        return;
+    }
+    // The page's point at the preview's top, as the sync aligns it
+    const float y = app.scrollY + documentContentTop(app);
+    const auto& anchors = app.scrollAnchors;
+    size_t lo = 0, hi = anchors.size();
+    while (lo + 1 < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (anchors[mid].renderedY <= y) lo = mid;
+        else hi = mid;
+    }
+    // Between two anchors the sync interpolates by source offset; past the
+    // last one it spreads the remaining source over the remaining page
+    double offset = (double)anchors[lo].sourceOffset;
+    float span = 0.0f;
+    double bytes = 0.0;
+    if (lo + 1 < anchors.size()) {
+        span = anchors[lo + 1].renderedY - anchors[lo].renderedY;
+        bytes = (double)anchors[lo + 1].sourceOffset - (double)anchors[lo].sourceOffset;
+    } else {
+        span = app.contentHeight - anchors[lo].renderedY;
+        bytes = (double)app.editorLineByteOffsets.back() - (double)anchors[lo].sourceOffset;
+    }
+    if (span > 0.0f && bytes > 0.0 && y > anchors[lo].renderedY) {
+        offset += std::min(1.0f, (y - anchors[lo].renderedY) / span) * bytes;
+    }
+    const auto next = std::upper_bound(app.editorLineByteOffsets.begin(),
+                                       app.editorLineByteOffsets.end(), (size_t)offset);
+    size_t line = next == app.editorLineByteOffsets.begin()
+                      ? 0 : (size_t)(next - app.editorLineByteOffsets.begin() - 1);
+    line = std::min(line, app.editorLineStarts.size() - 1);
+
+    float lineHeight = app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 1.5f : 20.0f;
+    float row = (float)line;
+    if (editorWrapOn(app)) {
+        ensureEditorRowMetrics(app);
+        if (line < app.editorRowStarts.size()) row = (float)app.editorRowStarts[line];
+    }
+    const float editorMax = std::max(0.0f, app.editorContentHeight - (float)app.height);
+    app.editorScrollY = std::clamp(row * lineHeight, 0.0f, editorMax);
+    // Rounding must not put the top a row short of the line
+    if (editorTopVisibleLine(app) < line && app.editorScrollY < editorMax) {
+        app.editorScrollY = std::min(editorMax, app.editorScrollY + 0.5f);
+    }
+}
+
+// The edit-mode preview follows the editor: the editor's top line maps
+// through the source-offset scroll anchors the layout records to a
+// preview scroll position (#77, #85). Called once per frame.
+void syncPreviewToEditor(App& app) {
+    if (editorPreviewVisible(app) && !app.editorReadingPreview && !app.scrollAnchors.empty() &&
+        !app.editorLineByteOffsets.empty()) {
+        // Find the editor's top visible line (row-aware in wrap mode)
+        int topLine = (int)editorTopVisibleLine(app);
+        topLine = std::max(0, std::min(topLine, (int)app.editorLineByteOffsets.size() - 1));
+        size_t topByteOffset = app.editorLineByteOffsets[topLine];
+
+        // Binary search for the anchor just before this byte offset
+        size_t lo = 0, hi = app.scrollAnchors.size();
+        while (lo + 1 < hi) {
+            size_t mid = (lo + hi) / 2;
+            if (app.scrollAnchors[mid].sourceOffset <= topByteOffset) lo = mid;
+            else hi = mid;
+        }
+
+        // Interpolate between anchor[lo] and anchor[lo+1]
+        float targetY;
+        if (lo + 1 < app.scrollAnchors.size() &&
+            app.scrollAnchors[lo + 1].sourceOffset > app.scrollAnchors[lo].sourceOffset) {
+            float t = (float)(topByteOffset - app.scrollAnchors[lo].sourceOffset) /
+                      (float)(app.scrollAnchors[lo + 1].sourceOffset - app.scrollAnchors[lo].sourceOffset);
+            t = std::max(0.0f, std::min(t, 1.0f));
+            targetY = app.scrollAnchors[lo].renderedY +
+                       t * (app.scrollAnchors[lo + 1].renderedY - app.scrollAnchors[lo].renderedY);
+        } else {
+            // Last anchor or single anchor — use ratio for remaining content
+            targetY = app.scrollAnchors[lo].renderedY;
+            if (app.contentHeight > app.scrollAnchors[lo].renderedY) {
+                size_t lastOffset = app.scrollAnchors[lo].sourceOffset;
+                size_t totalBytes = app.editorLineByteOffsets.back();
+                if (totalBytes > lastOffset) {
+                    float t = (float)(topByteOffset - lastOffset) / (float)(totalBytes - lastOffset);
+                    t = std::max(0.0f, std::min(t, 1.0f));
+                    targetY += t * (app.contentHeight - app.scrollAnchors[lo].renderedY);
+                }
+            }
+        }
+
+        // The docked pane runs to the window's bottom edge (#245), so the
+        // preview scrolls exactly as far as the reader does
+        float previewMaxScroll =
+            std::max(0.0f, app.contentHeight - (float)app.height);
+        // renderedY includes the page's top padding below the strip;
+        // subtract it so an editor at its top means a page at its top, and
+        // snap the last half-line so the page top is always reachable
+        // (t11 feedback)
+        float alignY = targetY - documentContentTop(app);
+        float synced = std::max(0.0f, std::min(alignY, previewMaxScroll));
+        if (app.editorScrollY <= 0.5f) synced = 0.0f;
+        float editorMax = std::max(0.0f, app.editorContentHeight - (float)app.height);
+        if (app.editorScrollY >= editorMax - 1.0f) {
+            // The editor has bottomed out, but rendered content is taller
+            // than its source (images, diagrams): let the preview overshoot
+            // to reach its tail (#85). Scrolling the editor up re-syncs.
+            app.scrollY = std::min(std::max(app.scrollY, synced), previewMaxScroll);
+        } else {
+            app.scrollY = synced;
+        }
+        app.targetScrollY = app.scrollY;
+    }
+}
+
 // Up/Down in wrap mode moves by VISUAL row, staying near the same x —
 // within a wrapped line first, then into the adjacent logical line
 static void editorMoveCursorVertical(App& app, bool down) {
@@ -983,23 +1102,20 @@ static bool editorMoveLines(App& app, bool down) {
 
 // --- Clipboard ---
 
-static void editorCopyToClipboard(HWND hwnd, const std::wstring& text) {
-    if (text.empty()) return;
-    if (!OpenClipboard(hwnd)) return;
-    EmptyClipboard();
-    size_t bytes = (text.size() + 1) * sizeof(wchar_t);
-    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (hMem) {
-        wchar_t* ptr = (wchar_t*)GlobalLock(hMem);
-        memcpy(ptr, text.c_str(), bytes);
-        GlobalUnlock(hMem);
-        SetClipboardData(CF_UNICODETEXT, hMem);
-    }
-    CloseClipboard();
+// Another program can hold the clipboard open for a moment, as Remote
+// Desktop's clipboard sync and clipboard history do after each change: the
+// copy waits for it briefly, and held for longer, copies nothing and says
+// so. Returns whether the text is on the clipboard: Cut deletes only what
+// it copied.
+static bool editorCopyToClipboard(App& app, HWND hwnd, const std::wstring& text) {
+    bool held = false;
+    if (copyToClipboard(hwnd, text, &held)) return true;
+    if (held) signalClipboardBusy(app);
+    return false;
 }
 
 static std::wstring editorGetClipboard(HWND hwnd) {
-    if (!OpenClipboard(hwnd)) return {};
+    if (!openClipboard(hwnd)) return {};
     HANDLE hData = GetClipboardData(CF_UNICODETEXT);
     if (!hData) { CloseClipboard(); return {}; }
     wchar_t* ptr = (wchar_t*)GlobalLock(hData);
@@ -1218,7 +1334,8 @@ void scrollEditorToMatch(App& app) {
 // Counts what a reader sees: the parsed Markdown's prose, link text and
 // inline code. Plain-text and diagram documents count as they stand.
 static TextCounts editorCountSource(App& app, const std::wstring& source) {
-    if (isPlainTextDocumentPath(app.currentFile) || isMermaidDocumentPath(app.currentFile)) {
+    if (isPlainTextDocumentPath(app.currentFile) || isMermaidDocumentPath(app.currentFile) ||
+        isPlantUmlDocumentPath(app.currentFile)) {
         return countPlainText(source);
     }
     auto result = parseDocument(app.parser, toUtf8(source), app.currentFile);
@@ -1231,7 +1348,7 @@ static TextCounts editorCountSource(App& app, const std::wstring& source) {
 // buffer when the preview pane is hidden
 static void editorRefreshDocCounts(App& app, const ElementPtr& parsed) {
     if (parsed && !isPlainTextDocumentPath(app.currentFile) &&
-        !isMermaidDocumentPath(app.currentFile)) {
+        !isMermaidDocumentPath(app.currentFile) && !isPlantUmlDocumentPath(app.currentFile)) {
         std::wstring visible;
         appendCountableText(parsed, visible);
         app.editorDocCounts = countPlainText(visible);
@@ -1367,9 +1484,11 @@ static void enterEditModeWithContent(App& app, const std::string& content,
         }
     }
     // Map the current reading position to a source line so the editor opens
-    // where the user was, not at the top (#77). Anchors carry UTF-8 source
-    // offsets; count newlines in the raw content to get the line number
-    // (unaffected by the \r\n normalization below).
+    // where the user was, not at the top (#77). Anchors carry UTF-8 offsets
+    // into the text the reading view parsed, which the viewer reads in text
+    // mode: a CRLF there is one byte. The raw content is walked the same way
+    // (as toggleTaskOnDisk does), or a CRLF file opened the editor further
+    // above the reading position the further down it was (#267).
     size_t targetLine = 0;
     if (app.scrollY > 1.0f && !app.scrollAnchors.empty()) {
         size_t lo = 0, hi = app.scrollAnchors.size();
@@ -1378,9 +1497,12 @@ static void enterEditModeWithContent(App& app, const std::string& content,
             if (app.scrollAnchors[mid].renderedY <= app.scrollY) lo = mid;
             else hi = mid;
         }
-        size_t srcOffset = std::min(app.scrollAnchors[lo].sourceOffset, content.size());
-        for (size_t i = 0; i < srcOffset; i++) {
+        const size_t target = app.scrollAnchors[lo].sourceOffset;
+        size_t textPos = 0;  // position in the CR-stripped text
+        for (size_t i = 0; i < content.size() && textPos < target; i++) {
+            if (content[i] == '\r' && i + 1 < content.size() && content[i + 1] == '\n') continue;
             if (content[i] == '\n') targetLine++;
+            textPos++;
         }
     }
 
@@ -1505,7 +1627,15 @@ void enterEditMode(App& app) {
     // Load raw file content
     std::wstring widePath = toWide(app.currentFile);
     std::ifstream file(widePath, std::ios::binary);
-    if (!file) return;
+    if (!file) {
+        // The viewer still owns the last readable source of a deleted
+        // file. Let the user recover it with Save or Save As.
+        if (!app.keepDeletedTabs || GetFileAttributesW(widePath.c_str()) != INVALID_FILE_ATTRIBUTES) return;
+        enterEditModeWithContent(app, app.sourceText);
+        app.editorDirty = true;
+        updateWindowTitle(app);
+        return;
+    }
 
     std::stringstream buf;
     buf << file.rdbuf();
@@ -1534,6 +1664,7 @@ void enterRecoveredDraft(App& app, HWND hwnd, const std::string& content,
                                       : (app.tabs[i].editMode && app.tabs[i].editorDirty);
             if (dirty || _stricmp(path.c_str(), origPath.c_str()) != 0) continue;
             tabActivate(app, hwnd, (int)i);
+            if (app.activeTab != (int)i) continue;
             enterEditModeWithContent(app, content);
             app.editorDirty = true;
             updateWindowTitle(app);
@@ -1608,6 +1739,15 @@ void exitEditMode(App& app) {
         std::stringstream buf;
         buf << file.rdbuf();
         auto result = parseDocument(app.parser, buf.str(), app.currentFile);
+        if (result.success) {
+            app.sourceText = buf.str();
+            app.root = result.root;
+            app.parseTimeUs = result.parseTimeUs;
+        }
+    } else {
+        // Discard edits back to the last viewed source, even if the file
+        // disappeared. This source lives only in the current process.
+        auto result = parseDocument(app.parser, app.sourceText, app.currentFile);
         if (result.success) {
             app.root = result.root;
             app.parseTimeUs = result.parseTimeUs;
@@ -1734,11 +1874,17 @@ void renderEditorReadingButton(App& app) {
 
 // --- File save ---
 
-// Classic Save As dialog for untitled quick notes (Ctrl+N). Returns false
+// Save As for quick notes, explicit copies and deleted originals. Returns false
 // when the user cancels; on success app.currentFile carries the new path
 // and the note becomes a normal file-backed session.
 static bool promptSaveAsPath(App& app, HWND hwnd) {
     wchar_t path[MAX_PATH] = L"";
+    const std::filesystem::path previous(toWide(app.currentFile));
+    const std::wstring name = previous.filename().wstring();
+    if (!name.empty()) wcsncpy_s(path, name.c_str(), _TRUNCATE);
+    const std::wstring directory = previous.parent_path().wstring();
+    const DWORD attributes = directory.empty() ? INVALID_FILE_ATTRIBUTES
+        : GetFileAttributesW(directory.c_str());
     OPENFILENAMEW ofn = {};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = hwnd;
@@ -1747,6 +1893,8 @@ static bool promptSaveAsPath(App& app, HWND hwnd) {
                       L"PlantUML (*.puml;*.plantuml)\0*.puml;*.plantuml\0"
                       L"All files (*.*)\0*.*\0";
     ofn.lpstrFile = path;
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY))
+        ofn.lpstrInitialDir = directory.c_str();
     ofn.nMaxFile = MAX_PATH;
     ofn.lpstrDefExt = L"md";
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
@@ -1918,15 +2066,13 @@ void renderQuickNoteEmptyState(App& app) {
     }
 }
 
-void saveEditorFile(App& app, HWND hwnd) {
+// The destination was checked or explicitly confirmed by the user.
+// Save As may choose a new file, so this writer must not prompt again.
+static void writeEditorFile(App& app, HWND hwnd) {
     // The open table cell belongs in the save (#148)
     tableEditCommit(app);
     auto seenKey = frontmatterSeenKey(app);
     std::string firstSeen = app.frontmatterFirstSeen.count(seenKey) ? app.frontmatterFirstSeen[seenKey] : fm::utcNow();
-    if (app.currentFile.empty()) {
-        // Untitled quick note: name it now; cancel keeps editing untitled
-        if (!promptSaveAsPath(app, hwnd)) return;
-    }
 
     std::string utf8 = toUtf8(app.editorText);
     if (!isPlainTextDocumentPath(app.currentFile) &&
@@ -1999,6 +2145,9 @@ void saveEditorFile(App& app, HWND hwnd) {
         // Reparse and update preview immediately
         editorReparse(app);
 
+        app.sourceText = utf8;
+        if (app.keepDeletedTabs) app.tabs[app.activeTab].viewerSource = app.sourceText;
+
         // Show "Saved!" notification
         signalPush(app, SIG_SUCCESS, SIGI_CHECK,
                    std::wstring(tr(app, "toast.saved")) + L" \u2014 ",
@@ -2022,6 +2171,24 @@ void saveEditorFile(App& app, HWND hwnd) {
     }
 }
 
+void saveEditorFile(App& app, HWND hwnd) {
+    tableEditCommit(app);
+    if (app.currentFile.empty()) {
+        saveEditorFileAs(app, hwnd);
+        return;
+    }
+    // Check the disk directly: deletion may precede the file-watch tick.
+    if (GetFileAttributesW(toWide(app.currentFile).c_str()) == INVALID_FILE_ATTRIBUTES) {
+        const DWORD error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+            app.editorDirty = true; // cancelling must also keep a clean recovery buffer open
+            saveEditorFileAs(app, hwnd);
+            return;
+        }
+    }
+    writeEditorFile(app, hwnd);
+}
+
 // Save As (#121): pick a new path, write there, and the tab follows
 void saveEditorFileAs(App& app, HWND hwnd) {
     auto key = frontmatterSeenKey(app);
@@ -2029,7 +2196,7 @@ void saveEditorFileAs(App& app, HWND hwnd) {
     if (!promptSaveAsPath(app, hwnd)) return;  // cancel keeps the old path
     if (!firstSeen.empty()) app.frontmatterFirstSeen[frontmatterSeenKey(app)] = firstSeen;
     app.editorDirty = true;  // force the write even for a clean buffer
-    saveEditorFile(app, hwnd);
+    writeEditorFile(app, hwnd);
     if (app.editorDirty) return;  // write failed (toast already shown)
 
     // The active tab takes on the new identity
@@ -2058,6 +2225,12 @@ void saveFileAs(App& app, HWND hwnd) {
     std::wstring src = toWide(previous);
     std::wstring dst = toWide(app.currentFile);
     bool ok = CopyFileW(src.c_str(), dst.c_str(), FALSE) != 0;
+    if (!ok && app.keepDeletedTabs && GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::ofstream file(dst, std::ios::binary);
+        file.write(app.sourceText.data(), (std::streamsize)app.sourceText.size());
+        file.close();
+        ok = !file.fail();
+    }
     if (!ok) {
         app.currentFile = previous;
         signalPushKey(app, SIG_ERROR, SIGI_WARNING, "toast.save_failed");
@@ -2065,6 +2238,7 @@ void saveFileAs(App& app, HWND hwnd) {
         tabsInit(app);
         App::DocTab& tab = app.tabs[app.activeTab];
         tab.path = app.currentFile;
+        if (app.keepDeletedTabs) tab.viewerSource = app.sourceText;
         size_t slash = app.currentFile.find_last_of("/\\");
         tab.title = toWide(slash == std::string::npos
                                ? app.currentFile
@@ -2572,22 +2746,20 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                 return;
             case 'C':
                 if (!app.editorExtraCarets.empty()) {
-                    editorCopyToClipboard(hwnd, editorCaretSelectionsText(app));
+                    editorCopyToClipboard(app, hwnd, editorCaretSelectionsText(app));
                 } else if (app.editorHasSelection) {
-                    editorCopyToClipboard(hwnd, editorGetSelectedText(app));
+                    editorCopyToClipboard(app, hwnd, editorGetSelectedText(app));
                 }
                 return;
             case 'X':
                 if (!app.editorExtraCarets.empty()) {
                     std::wstring cut = editorCaretSelectionsText(app);
-                    if (cut.empty()) return;
-                    editorCopyToClipboard(hwnd, cut);
+                    if (cut.empty() || !editorCopyToClipboard(app, hwnd, cut)) return;
                     editorEditAtCarets(app, [&](size_t) { editorDeleteSelection(app); });
                     scheduleReparse(app);
                     editorEnsureCursorVisible(app);
                     InvalidateRect(hwnd, nullptr, FALSE);
-                } else if (app.editorHasSelection) {
-                    editorCopyToClipboard(hwnd, editorGetSelectedText(app));
+                } else if (app.editorHasSelection && editorCopyToClipboard(app, hwnd, editorGetSelectedText(app))) {
                     editorDeleteSelection(app);
                     scheduleReparse(app);
                     editorEnsureCursorVisible(app);
@@ -3095,12 +3267,10 @@ void editorInsertSnippetPublic(App& app, HWND hwnd,
 void editorClipboardCut(App& app, HWND hwnd) {
     if (!app.editorExtraCarets.empty()) {
         std::wstring cut = editorCaretSelectionsText(app);
-        if (cut.empty()) return;
-        editorCopyToClipboard(hwnd, cut);
+        if (cut.empty() || !editorCopyToClipboard(app, hwnd, cut)) return;
         editorEditAtCarets(app, [&](size_t) { editorDeleteSelection(app); });
     } else {
-        if (!app.editorHasSelection) return;
-        editorCopyToClipboard(hwnd, editorGetSelectedText(app));
+        if (!app.editorHasSelection || !editorCopyToClipboard(app, hwnd, editorGetSelectedText(app))) return;
         editorDeleteSelection(app);
     }
     rebuildLineStarts(app);
@@ -3111,9 +3281,9 @@ void editorClipboardCut(App& app, HWND hwnd) {
 
 void editorClipboardCopy(App& app, HWND hwnd) {
     if (!app.editorExtraCarets.empty()) {
-        editorCopyToClipboard(hwnd, editorCaretSelectionsText(app));
+        editorCopyToClipboard(app, hwnd, editorCaretSelectionsText(app));
     } else if (app.editorHasSelection) {
-        editorCopyToClipboard(hwnd, editorGetSelectedText(app));
+        editorCopyToClipboard(app, hwnd, editorGetSelectedText(app));
     }
 }
 
@@ -3482,6 +3652,13 @@ static size_t editorPosFromClick(App& app, int x, int y) {
     return lineStart + col;
 }
 
+// The band the editor's scrollbar takes presses in, at the pane's right edge
+static bool overEditorScrollbar(const App& app, float x) {
+    const float editorWidth = editorPaneWidth(app);
+    return app.editorContentHeight > app.height && x >= editorWidth - dpi(app, 14.0f) &&
+           x <= editorWidth - dpi(app, 2.0f);
+}
+
 void handleEditorMouseDown(App& app, HWND hwnd, int x, int y) {
     float editorWidth = editorPaneWidth(app);
 
@@ -3494,9 +3671,7 @@ void handleEditorMouseDown(App& app, HWND hwnd, int x, int y) {
     // Editor scrollbar: a track click jumps, and the drag follows (#121).
     // Checked before the separator, whose grab zone overlaps the thumb —
     // the thin scrollbar is the more deliberate target
-    if (app.editorContentHeight > app.height &&
-        (float)x >= editorWidth - dpi(app, 14.0f) &&
-        (float)x <= editorWidth - dpi(app, 2.0f)) {
+    if (overEditorScrollbar(app, (float)x)) {
         float maxScroll = app.editorContentHeight - app.height;
         float sbHeight = (float)app.height / app.editorContentHeight * app.height;
         sbHeight = std::max(sbHeight, dpi(app, 30.0f));
@@ -3669,6 +3844,8 @@ void handleEditorMouseMove(App& app, HWND hwnd, int x, int y) {
     }
 
     if (app.editorScrollbarDragging) {
+        // The pointer stays an arrow for the whole drag, over the text too (#280)
+        SetCursor(LoadCursor(nullptr, IDC_ARROW));
         float maxScroll = std::max(0.0f, app.editorContentHeight - app.height);
         float sbHeight = (float)app.height /
                          std::max(1.0f, app.editorContentHeight) * app.height;
@@ -3718,6 +3895,9 @@ void handleEditorMouseMove(App& app, HWND hwnd, int x, int y) {
     if (editSplitPreview(app) && (float)x >= editorWidth &&
         (float)x < editorWidth + editSeamWidth(app)) {
         SetCursor(cursorSizeWE);
+        return;
+    } else if (overEditorScrollbar(app, (float)x)) {
+        SetCursor(cursorArrow);  // a control, not text (#280)
         return;
     } else if (x < editorWidth) {
         SetCursor(cursorIBeam);
@@ -4172,4 +4352,155 @@ void renderEditor(App& app, float editorWidth) {
     }
 
     app.renderTarget->PopAxisAlignedClip();
+}
+
+// --- Go to line (#276) ---
+
+// The editor's source when it shows, the reading view's otherwise (the
+// reading view inside edit mode included)
+static bool gotoLineInEditor(const App& app) {
+    return app.editMode && !app.editorReadingPreview;
+}
+
+size_t gotoLineCount(const App& app) {
+    // Inside edit mode both views show the editor's text
+    if (app.editMode) return std::max<size_t>(1, app.editorLineStarts.size());
+    return 1 + (size_t)std::count(app.sourceText.begin(), app.sourceText.end(), '\n');
+}
+
+void gotoLineOpenPrompt(App& app) {
+    if (app.showSearch) closeSearchInput(app);  // both sit at the top
+    app.gotoLineOpen = true;
+    app.gotoLineInput.clear();
+}
+
+void gotoLineJump(App& app, size_t line) {
+    line = std::clamp<size_t>(line, 1, gotoLineCount(app));
+    if (gotoLineInEditor(app)) {
+        app.editorExtraCarets.clear();
+        app.editorHasSelection = false;
+        app.editorCursorPos = app.editorLineStarts[line - 1];
+        app.editorSelStart = app.editorSelEnd = app.editorCursorPos;
+        app.editorDesiredCol = -1;
+        app.editorCaretUpstreamPos = std::wstring::npos;
+        // The line a little above the middle, as search matches land (#260)
+        ensureEditorRowMetrics(app);
+        const float viewportH = (float)app.height - chromeTopHeight(app);
+        app.editorScrollY = std::max(0.0f, editorPosRowY(app, app.editorCursorPos, false) - viewportH * 0.4f);
+        editorEnsureCursorVisible(app);
+        resetCursorBlink(app);
+        return;
+    }
+    // The reading view: through the scroll anchors to where the line's
+    // block is drawn. An anchor's offset is its block's first text, after
+    // markers such as "## " or "- ", so the last anchor up to the line's
+    // end is the block that starts on the line, or the one it continues,
+    // as for the caret's block in the preview. The offsets count in the
+    // text that was parsed: the editor's inside edit mode, whose reading
+    // view may show edits the viewer's source has not seen.
+    size_t end = SIZE_MAX;  // the last line: every anchor
+    if (app.editMode) {
+        if (line < app.editorLineByteOffsets.size()) end = app.editorLineByteOffsets[line] - 1;
+    } else {
+        size_t start = 0;
+        for (size_t i = 0, current = 1; i < app.sourceText.size() && current < line; ++i) {
+            if (app.sourceText[i] == '\n') {
+                ++current;
+                start = i + 1;
+            }
+        }
+        end = std::min(end, app.sourceText.find('\n', start));
+    }
+    ensureLayoutComplete(app);  // anchors far down exist only once laid out
+    float y = 0.0f;
+    for (const auto& anchor : app.scrollAnchors) {
+        if (anchor.sourceOffset > end) break;
+        y = anchor.renderedY - documentContentTop(app);
+    }
+    const float maxScroll = std::max(0.0f, app.contentHeight - (float)app.height);
+    app.scrollY = app.targetScrollY = std::clamp(y, 0.0f, maxScroll);
+}
+
+bool gotoLineKeyDown(App& app, HWND hwnd, WPARAM key) {
+    if (key == VK_ESCAPE || key == VK_RETURN) {
+        const std::wstring typed = app.gotoLineInput;
+        app.gotoLineOpen = false;
+        app.gotoLineInput.clear();
+        if (key == VK_RETURN && !typed.empty()) gotoLineJump(app, (size_t)std::wcstoull(typed.c_str(), nullptr, 10));
+    } else if (key == VK_BACK) {
+        if (!app.gotoLineInput.empty()) app.gotoLineInput.pop_back();
+    } else {
+        // Every other key stays with the prompt but is left unconsumed: the
+        // message loop translates only unconsumed keys into the characters
+        // gotoLineChar reads (#282), in whatever layout types the digits
+        return false;
+    }
+    InvalidateRect(hwnd, nullptr, FALSE);
+    // Consumed, so Enter, Esc and Backspace make no character for the
+    // editor once the prompt has closed
+    return true;
+}
+
+void gotoLineChar(App& app, wchar_t ch) {
+    if (ch >= L'0' && ch <= L'9' && app.gotoLineInput.size() < 9) app.gotoLineInput += ch;
+}
+
+// Centred at the top of the pane it acts on
+D2D1_RECT_F gotoLinePromptBox(const App& app) {
+    const float paneLeft = gotoLineInEditor(app) ? editRailWidth(app) : documentViewportX(app);
+    const float paneWidth = gotoLineInEditor(app) ? editorPaneWidth(app) - editRailWidth(app)
+                                                  : documentViewportWidth(app);
+    const float w = std::min(dpi(app, 300.0f), paneWidth - dpi(app, 16.0f));
+    const float h = dpi(app, 38.0f);
+    const float x = paneLeft + (paneWidth - w) * 0.5f;
+    const float y = chromeTopHeight(app) + dpi(app, 12.0f);
+    return D2D1::RectF(x, y, x + w, y + h);
+}
+
+bool gotoLinePromptHit(const App& app, float x, float y) {
+    if (!app.gotoLineOpen) return false;
+    const D2D1_RECT_F box = gotoLinePromptBox(app);
+    return x >= box.left && x < box.right && y >= box.top && y < box.bottom;
+}
+
+void renderGotoLinePrompt(App& app) {
+    IDWriteTextFormat* format = app.searchTextFormat;
+    if (!app.gotoLineOpen || !format) return;
+    const D2D1_RECT_F box = gotoLinePromptBox(app);
+    const float h = box.bottom - box.top;
+    D2D1_COLOR_F shadow = D2D1::ColorF(0, 0, 0, app.theme.isDark ? 0.35f : 0.12f);
+    app.brush->SetColor(shadow);
+    app.renderTarget->FillRoundedRectangle(
+        D2D1::RoundedRect(D2D1::RectF(box.left, box.top + dpi(app, 2.0f), box.right, box.bottom + dpi(app, 3.0f)),
+                          dpi(app, 9.0f), dpi(app, 9.0f)), app.brush);
+    app.brush->SetColor(app.theme.background);
+    app.renderTarget->FillRoundedRectangle(D2D1::RoundedRect(box, dpi(app, 8.0f), dpi(app, 8.0f)), app.brush);
+    D2D1_COLOR_F border = app.theme.accent;
+    border.a = 0.6f;
+    app.brush->SetColor(border);
+    app.renderTarget->DrawRoundedRectangle(D2D1::RoundedRect(box, dpi(app, 8.0f), dpi(app, 8.0f)), app.brush,
+                                           dpi(app, 1.2f));
+    // "Go to line  123|        1–N"
+    D2D1_COLOR_F muted = app.theme.text;
+    muted.a = 0.55f;
+    const float pad = dpi(app, 12.0f);
+    // The format draws from the top: centre its line in the box
+    const float textTop = box.top + (h - format->GetFontSize() * 1.33f) * 0.5f;
+    const std::wstring label = tr(app, "editor.goto_line");
+    const float labelW = measureText(app, label.c_str(), format);
+    app.brush->SetColor(muted);
+    app.renderTarget->DrawText(label.c_str(), (UINT32)label.size(), format,
+                               D2D1::RectF(box.left + pad, textTop, box.right - pad, box.bottom), app.brush);
+    const std::wstring range = L"1\u2013" + std::to_wstring(gotoLineCount(app));
+    const float rangeW = measureText(app, range.c_str(), format);
+    app.renderTarget->DrawText(range.c_str(), (UINT32)range.size(), format,
+                               D2D1::RectF(box.right - pad - rangeW, textTop, box.right - pad, box.bottom), app.brush);
+    const float inputX = box.left + pad + labelW + dpi(app, 12.0f);
+    app.brush->SetColor(app.theme.text);
+    app.renderTarget->DrawText(app.gotoLineInput.c_str(), (UINT32)app.gotoLineInput.size(), format,
+                               D2D1::RectF(inputX, textTop, box.right - pad - rangeW, box.bottom), app.brush);
+    const float caretX = inputX + measureText(app, app.gotoLineInput.c_str(), format) + dpi(app, 1.0f);
+    app.brush->SetColor(app.theme.accent);
+    app.renderTarget->FillRectangle(
+        D2D1::RectF(caretX, box.top + h * 0.25f, caretX + dpi(app, 1.5f), box.bottom - h * 0.25f), app.brush);
 }

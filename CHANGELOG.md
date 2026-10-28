@@ -1,5 +1,56 @@
 # Changelog
 
+## [v3.9.3] - 2026-10-26
+
+### Fixed
+- Ctrl+G's go-to-line prompt takes the line number again: in 3.9.2 nothing could be typed into it, and clicking it closed it. Reported by @derek-price (#282)
+- Mermaid state diagrams draw composite states, `state Name { … }`, nested and with concurrent regions split by `--`; such a diagram showed its source before
+- In Mermaid state, class and ER diagrams, edges no longer run through other boxes, and edge labels and notes no longer cover them, in every direction
+- Mermaid C4 relationship labels sit clear of the boxes and of each other instead of covering the boxes' text
+- Mermaid flowcharts draw the asymmetric `id>text]` shape and read longer links such as `--->`, `===>` and `-..->`; both drew wrong nodes before
+
+## [v3.9.2] - 2026-10-26
+
+### Added
+- Ctrl+G goes to a line: type its number in the prompt at the top of the editor or the reading view and press Enter. The editor puts the caret at the start of the line; the reading view scrolls to where it is drawn. Requested by @derek-price (#276)
+- The interface is available in Russian, chosen automatically on Russian Windows or in Settings → General → Language. Contributed by @NorthMause (#274)
+- Keep deleted files in memory (Settings → General, off by default) keeps a deleted file's last content readable and editable in its tab until the tab or Tinta closes; saving it asks for a place with Save As. Contributed by @NorthMause (#275)
+- Settings → Appearance → Show notifications turns off the messages that go away on their own: copy confirmations, "Saved", status messages and the edit-mode hints. Warnings, errors and messages that need an answer still show. Requested by @megayu (#273)
+- The mouse wheel over the tab strip switches to the previous or next tab, wrapping at both ends; Ctrl+wheel still zooms. Requested by @megayu (#272)
+- `inlinecodebackground=` in `themes.ini` sets the box behind inline code: `none` drops it, a colour gives it its own. Code blocks keep `codebackground`, and the HTML and Word exports and printing follow it. Requested by @Knewhenry (#278)
+
+### Fixed
+- Mermaid flowchart labels in double quotes can run over several lines; such a diagram showed its source before. Quotes around edge text no longer show in the label, and a long one-word edge label stays on one line. Reported by @derek-price (#281)
+- Beside the preview, the editor's scrollbar shows the arrow pointer, and the preview's scrollbar can be dragged, moving both panes. Reported by @a86022 (#280)
+- A document left for a new note, the start page or an untitled tab, or reopened after its last tab closed, comes back where it was read instead of at an older place. Reported by @aweib888 (#279)
+- A single `~` between digits or Chinese, Japanese or Korean characters, as in `50~100mm`, reads as a range instead of starting a subscript. Reported by @aweib888 (#277)
+- In files with Windows (CRLF) line endings, E opens the editor at the reading position instead of above it. Reported by @derek-price (#267)
+- Opening Help no longer centres the text of the contents panel, the search results and the tab card. Reported by @megayu (#270)
+- The first and last tabs show the active tab's halo on both sides. Reported by @megayu (#271)
+
+## [v3.9.0] - 2026-10-21
+
+### Fixed
+- Mermaid diagrams that open with YAML front matter (`title`, `config`) render instead of showing their source, for every diagram type, including the first example of Mermaid's ER documentation. Reported by @tigerhawkvok (#261)
+- In edit mode the preview keeps following the editor to the end of long documents; a code block whose first line was indented stopped it partway down. Reported by @derek-price (#267)
+- With word wrap on, zooming the editor with Ctrl+wheel no longer draws long lines over the lines below them. Reported by @a86022 (#266)
+- Fonts saved in the theme editor apply to the open document at once, including a change to the heading font alone. Reported by @go4399 (#265)
+- A code block's copy button no longer adds a line break after the last line. Reported by @dmacasek (#269)
+
+## [v3.8.1] - 2026-10-16
+
+### Added
+- PlantUML diagrams: `plantuml` fences (also `puml` and `pu`) and standalone `.puml` and `.plantuml` files render through a PlantUML you already have, a `plantuml.exe` or a `plantuml.jar` run with Java, chosen in Settings → Editor. Diagrams follow the theme in the preview, print and the HTML and Word exports. PlantUML always runs in its sandbox, so a diagram cannot read files or reach the network. Contributed by @ArcSalazar (#248)
+- HTML `<sub>`, `<sup>` and `<ins>`, plus `<u>`, `<del>`, `<s>` and `<mark>`, render in paragraphs, headings, lists, tables, quotes and HTML blocks, and stay in the HTML and Word exports; `~~` and `==` pair across them. Suggested by @Ragos81 (#263)
+- The theme editor chooses the text, heading and code fonts with a Text / Headings / Code switch above its font list, and `themes.ini` always lists `headingfont=`. Requested by @go4399 (#256)
+
+### Fixed
+- Inline code sits on the baseline of the text beside it with any body and code font, including Chinese text, tables and headings. Reported by @go4399 and @tigerhawkvok (#259, #262)
+- Bold and italic words in a heading keep the heading's size, and superscripts and subscripts in a heading scale with it (#259, #263)
+- With word wrap on, stepping through the editor's search matches keeps the current match on screen. Reported by @derek-price (#260)
+- Word export sets Chinese text in the theme's font in Chinese Word too, instead of DengXian. Reported by @go4399 (#256)
+- HTML blocks keep the space beside inline tags such as `<b>` and `<a>` instead of joining the words (#263)
+
 ## [v3.8.0] - 2026-10-10
 
 ### Added

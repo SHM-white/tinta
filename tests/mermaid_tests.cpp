@@ -1,7 +1,10 @@
 #include "mermaid.h"
 #include "mermaid_ext.h"
+#include "c4_label_checks.h"
+#include "mermaid_layout_checks.h"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -211,6 +214,62 @@ void testBackslashNLineBreak() {
           "literal \\n in a label becomes a line break");
 }
 
+// #281: a double-quoted label may run over lines, as Mermaid allows, and its
+// line breaks are the label's; quotes around edge text delimit it
+const mermaid::Edge* findEdge(const mermaid::Diagram& diagram, const std::string& from,
+                              const std::string& to) {
+    for (const auto& edge : diagram.edges) {
+        if (diagram.nodes[edge.from].id == from && diagram.nodes[edge.to].id == to) return &edge;
+    }
+    return nullptr;
+}
+
+void testMultilineQuotedLabels() {
+    // The reporter's shape: front matter, a comment, tabs, CRLF, circles,
+    // hyphenated IDs, a loop and edge labels running over two to four lines
+    const std::string source =
+        "---\r\ntitle: State Machine\r\n---\r\n%% stateDiagram-v2\r\ngraph TB\r\n\r\n"
+        "\tSTART((START)) -- \"Nop\" --> MSH((MSH))\r\n"
+        "\tMSH((MSH)) -- \"Push:ORDERS\r\nPush:LABORDERS\" --> PID-NTE((PID-NTE))\r\n"
+        "\tPID-NTE((PID-NTE)) -- \"Nop\" --> PID-NTE((PID-NTE))\r\n"
+        "\tPID-NTE((PID-NTE)) -- \"Pop\r\nPop\r\n    Pop\r\nPop\" --> MSH((MSH))\r\n"
+        "\tMSH -->|\"Quoted\"| N[\"first line\r\n   second line\"]\r\n"
+        "\tN -- \"an --> inside\" --> START\r\n";
+    auto result = mermaid::parse(source);
+    check(result.success, "labels running over lines parse");
+    if (!result.success) {
+        std::cerr << "  line " << result.errorLine << ": " << result.error << '\n';
+        return;
+    }
+    const auto* nop = findEdge(result.diagram, "START", "MSH");
+    check(nop && nop->label == "Nop", "quotes around an edge's text are not part of it");
+    const auto* push = findEdge(result.diagram, "MSH", "PID-NTE");
+    check(push && push->label == "Push:ORDERS\nPush:LABORDERS",
+          "a quoted edge text keeps its line break, without the CR");
+    const auto* loop = findEdge(result.diagram, "PID-NTE", "PID-NTE");
+    check(loop && loop->label == "Nop", "a node's edge to itself parses");
+    const auto* pops = findEdge(result.diagram, "PID-NTE", "MSH");
+    check(pops && pops->label == "Pop\nPop\nPop\nPop",
+          "four lines, the indentation of one not part of the text");
+    const auto* quoted = findEdge(result.diagram, "MSH", "N");
+    check(quoted && quoted->label == "Quoted", "quotes in a |text| label delimit it too");
+    const auto* node = findNode(result.diagram, "N");
+    check(node && node->label == "first line\nsecond line", "a quoted node label runs over lines");
+    const auto* arrow = findEdge(result.diagram, "N", "START");
+    check(arrow && arrow->label == "an --> inside", "an arrow inside quoted edge text stays text");
+    check(result.diagram.nodes.size() == 4, "the diagram has its four nodes");
+
+    // Errors after a label that ran over lines still name their own line
+    auto broken = mermaid::parse("graph TD\nA -- \"one\ntwo\" --> B\nC ?? D\n");
+    check(!broken.success && broken.errorLine == 4, "a later error names its own line");
+
+    // A single quote is not a Mermaid string: an apostrophe joins nothing
+    auto apostrophe = mermaid::parse("graph TD\nA[Don't stop] --> B\nB --> C\n");
+    check(apostrophe.success && apostrophe.diagram.edges.size() == 2 &&
+              findEdge(apostrophe.diagram, "B", "C"),
+          "an apostrophe in a label leaves the next line alone");
+}
+
 void testAttributeSyntaxRejected() {
     const char* source = R"(flowchart TD
 A@{ shape: rounded, label: "Fancy" } --> B[Plain]
@@ -356,6 +415,9 @@ void testExtBuilders() {
          "curve b{70, 75, 85}\nmax 100\nmin 0\n"},
         {Kind::Sankey, "sankey",
          "sankey-beta\nA,B,10\nA,C,5\nB,D,8\nC,D,5\n\"E, e\",D,2\n"},
+        {Kind::C4, "c4",
+         "C4Context\n    Person(a, \"A\")\n    System(b, \"B\")\n"
+         "    Rel(a, b, \"Uses\")\n"},
     };
     for (const auto& testCase : kCases) {
         auto built = mermaidext::build(testCase.kind, testCase.source,
@@ -373,6 +435,324 @@ void testExtBuilders() {
     }
 }
 
+// The ```mermaid fences of a Markdown file, in order
+std::vector<std::string> mermaidFences(const std::string& markdown) {
+    std::vector<std::string> fences;
+    std::string current;
+    bool inside = false;
+    size_t position = 0;
+    while (position < markdown.size()) {
+        size_t newline = markdown.find('\n', position);
+        if (newline == std::string::npos) newline = markdown.size();
+        std::string line = markdown.substr(position, newline - position);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!inside && line.rfind("```mermaid", 0) == 0) {
+            inside = true;
+            current.clear();
+        } else if (inside && line == "```") {
+            inside = false;
+            fences.push_back(current);
+        } else if (inside) {
+            current += line + "\n";
+        }
+        position = newline + 1;
+    }
+    return fences;
+}
+
+// What the app does with a fence: draws it, or shows its source
+bool drawsDiagram(const std::string& source, std::string& error) {
+    const auto kind = mermaidext::detectKind(source);
+    if (kind == mermaidext::Kind::None) {
+        error = "diagram type not recognised";
+        return false;
+    }
+    if (kind == mermaidext::Kind::Flowchart) {
+        auto parsed = mermaid::parse(source);
+        error = parsed.error;
+        return parsed.success;
+    }
+    auto built = mermaidext::build(kind, source, fakeMeasure, 1.0f);
+    error = built.error;
+    return built.ok && !built.prims.empty();
+}
+
+// #261: a diagram may open with YAML front matter (title, config). The
+// fixture's first five fences put it on other diagram types; the rest are
+// the 25 examples of Mermaid's ER documentation, in order.
+void testFrontMatterFixture() {
+    std::ifstream file(TINTA_MERMAID_FRONT_MATTER_FIXTURE, std::ios::binary);
+    check(static_cast<bool>(file), "front matter fixture opens");
+    const std::string markdown((std::istreambuf_iterator<char>(file)),
+                               std::istreambuf_iterator<char>());
+    const auto fences = mermaidFences(markdown);
+    check(fences.size() == 30, "the fixture has 5 front matter and 25 ER docs fences");
+    // Fences that draw: every one with front matter (1-6, 9, 30) and the
+    // ER docs examples whose syntax the ER renderer knows. The others use
+    // ER syntax it does not support yet (cardinalities in words, a quoted
+    // entity on its own, subgraphs, style and classDef), and show their
+    // source instead of a wrong diagram.
+    const std::vector<size_t> draws = {1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 14, 15, 16, 18, 19, 30};
+    for (size_t i = 0; i < fences.size(); ++i) {
+        std::string error;
+        const bool drawn = drawsDiagram(fences[i], error);
+        const bool expected =
+            std::find(draws.begin(), draws.end(), i + 1) != draws.end();
+        if (drawn != expected) {
+            std::cerr << "  fence " << i + 1 << (drawn ? " draws" : " shows source: " + error) << '\n';
+        }
+        check(drawn == expected, "a fence draws exactly when its syntax is supported");
+    }
+    // The front matter is skipped whole, whatever YAML it holds, and only
+    // when it opens the source
+    using mermaidext::skipFrontMatter;
+    check(skipFrontMatter("---\ntitle: T\n---\nerDiagram\n") == "erDiagram\n",
+          "a title block is skipped");
+    check(skipFrontMatter("\xEF\xBB\xBF\n---\r\nconfig:\r\n  theme: dark\r\n---  \r\npie\r\n") ==
+              "pie\r\n",
+          "a byte order mark, a blank line, CRLF and trailing spaces are fine");
+    check(skipFrontMatter("---\ntitle: never closed\nerDiagram\n") ==
+              "---\ntitle: never closed\nerDiagram\n",
+          "an unclosed block is not front matter");
+    check(skipFrontMatter("graph TD\nA---B\n---\n") == "graph TD\nA---B\n---\n",
+          "a --- line after the diagram starts is not front matter");
+    check(skipFrontMatter("---\n---\n").empty(), "an empty block leaves nothing");
+    // The flowchart parser blanks the block, so error lines still count
+    // from the top of the fence
+    auto bad = mermaid::parse("---\ntitle: T\n---\nflowchart LR\n  A -- B\n");
+    check(!bad.success && bad.errorLine == 5,
+          "a flowchart error after front matter reports its own line");
+}
+
+// The ids of a diagram's asymmetric nodes, in order, separated by spaces
+std::string asymmetricIds(const mermaid::Diagram& diagram) {
+    std::string ids;
+    for (const auto& node : diagram.nodes) {
+        if (node.shape != mermaid::NodeShape::Asymmetric) continue;
+        if (!ids.empty()) ids += ' ';
+        ids += node.id;
+    }
+    return ids;
+}
+
+// id>text] is Mermaid's asymmetric shape. It drew as one rectangle whose id
+// and label were the whole "S>Screen]".
+void testAsymmetricShape() {
+    auto screen = mermaid::parse("flowchart LR\nR -.-> S>Screen]\n");
+    check(screen.success, "an edge to an asymmetric node parses");
+    if (screen.success) {
+        const auto* node = findNode(screen.diagram, "S");
+        check(node && node->label == "Screen" &&
+                  node->shape == mermaid::NodeShape::Asymmetric,
+              "S>Screen] is node S, labelled Screen, asymmetric");
+        check(screen.diagram.nodes.size() == 2 && screen.diagram.edges.size() == 1 &&
+                  screen.diagram.edges[0].dashed && findEdge(screen.diagram, "R", "S"),
+              "the dotted edge runs from R to S");
+    }
+
+    // Quoted text as for the other shapes: '>', ']' and ';' inside, a label
+    // over two lines; unquoted text keeps ';' and '|' as a bracketed one does
+    auto labels = mermaid::parse(
+        "flowchart LR\n"
+        "A>\"a > b ] c; d\"] --> B>\"first line\n   second line\"]\n"
+        "C>one; two | three] --> D; D --> E\n"
+        "F>Classed]:::hot\n"
+        "G --> H\n"
+        "H>Defined later]\n"
+        "subgraph Group\n"
+        "    I>Inside]\n"
+        "end\n");
+    check(labels.success, "asymmetric labels parse");
+    if (labels.success) {
+        const auto& diagram = labels.diagram;
+        const auto* a = findNode(diagram, "A");
+        check(a && a->label == "a > b ] c; d", "a quoted label keeps '>', ']' and ';'");
+        const auto* b = findNode(diagram, "B");
+        check(b && b->label == "first line\nsecond line", "a quoted label runs over two lines");
+        const auto* c = findNode(diagram, "C");
+        check(c && c->label == "one; two | three", "an unquoted label keeps ';' and '|'");
+        check(findEdge(diagram, "C", "D") && findEdge(diagram, "D", "E"),
+              "a ';' after the label still separates statements");
+        const auto* f = findNode(diagram, "F");
+        check(f && f->className == "hot", "a class follows the label");
+        const auto* h = findNode(diagram, "H");
+        check(h && h->label == "Defined later", "a node used before takes the shape later");
+        check(diagram.subgraphs.size() == 1 && diagram.subgraphs[0].nodes.size() == 1 &&
+                  diagram.nodes[diagram.subgraphs[0].nodes[0]].id == "I",
+              "an asymmetric node belongs to its subgraph");
+        check(asymmetricIds(diagram) == "A B C F H I", "every '>' node is asymmetric");
+    }
+
+    // A '>' that belongs to an arrow or to text never opens the shape
+    struct Case {
+        const char* line;
+        const char* asymmetric;  // ids of the asymmetric nodes
+        const char* edgeLabel;
+    };
+    const Case cases[] = {
+        {"A-->B", "", ""},
+        {"A --> B", "", ""},
+        {"A ==> B", "", ""},
+        {"A -.-> B", "", ""},
+        {"A==>B>Text]", "B", ""},
+        {"A-.->B>Text]", "B", ""},
+        {"A --> B>Text]", "B", ""},
+        {"A>Text] --> B", "A", ""},
+        {"A>Text]-->B", "A", ""},
+        {"A -- text --> B", "", "text"},
+        {"A -- a > b --> B", "", "a > b"},
+        {"A -->|a > b| B", "", "a > b"},
+        {"A>Text] -->|a > b| B>\"c > d\"]", "A B", "a > b"},
+        {"A[\"a > b\"] --> B(\"c > d\")", "", ""},
+    };
+    for (const auto& item : cases) {
+        const std::string name = std::string("'") + item.line + "'";
+        auto parsed = mermaid::parse(std::string("flowchart LR\n") + item.line + "\n");
+        check(parsed.success, (name + " parses").c_str());
+        if (!parsed.success) continue;
+        const auto& diagram = parsed.diagram;
+        check(diagram.nodes.size() == 2 && findNode(diagram, "A") && findNode(diagram, "B"),
+              (name + " has nodes A and B, and no others").c_str());
+        check(asymmetricIds(diagram) == item.asymmetric,
+              (name + " has asymmetric nodes '" + item.asymmetric + "', not '" +
+               asymmetricIds(diagram) + "'").c_str());
+        check(diagram.edges.size() == 1 && diagram.edges[0].directed &&
+                  diagram.edges[0].label == item.edgeLabel,
+              (name + " has one directed edge labelled '" + item.edgeLabel + "'").c_str());
+    }
+    auto thick = mermaid::parse("flowchart LR\nA==>B\n");
+    check(thick.success && thick.diagram.edges.size() == 1 &&
+              thick.diagram.edges[0].strokeScale == 2.0f,
+          "'A==>B' stays a thick arrow");
+    auto dotted = mermaid::parse("flowchart LR\nA-.->B\n");
+    check(dotted.success && dotted.diagram.edges.size() == 1 && dotted.diagram.edges[0].dashed,
+          "'A-.->B' stays a dotted arrow");
+
+    // In edge text, a '>' after a letter opens no label either: the ';'
+    // after the edge still separates
+    auto edgeText = mermaid::parse("flowchart LR\nA -- a>b --> B; B --> C\nC -->|x>y| D; D --> E\n");
+    check(edgeText.success && edgeText.diagram.edges.size() == 4 &&
+              edgeText.diagram.edges[0].label == "a>b" &&
+              edgeText.diagram.edges[2].label == "x>y" && asymmetricIds(edgeText.diagram).empty(),
+          "a '>' in edge text stays text");
+
+    // The '>' of "->", which Mermaid does not have, opens no node either:
+    // the diagram shows its source
+    auto arrowTypo = mermaid::parse("flowchart LR\nA->B\n");
+    check(!arrowTypo.success && arrowTypo.error == "Unsupported edge syntax",
+          "'A->B' shows its source as an unsupported edge");
+
+    check(mermaid::leftNotch(mermaid::NodeShape::Asymmetric, 52.0f) == 26.0f &&
+              mermaid::leftNotch(mermaid::NodeShape::Rectangle, 52.0f) == 0.0f &&
+              mermaid::leftNotch(mermaid::NodeShape::Hexagon, 52.0f) == 0.0f,
+          "only the asymmetric shape is notched, half its height in");
+}
+
+// A longer link is the same edge as its short form; Mermaid's extra length
+// only stretches it over more ranks. Links Tinta does not draw (circle and
+// cross ends, both-way and invisible links) show the source.
+void testLongLinks() {
+    struct Case {
+        const char* line;
+        bool directed;
+        bool dashed;
+        float strokeScale;
+        const char* label;
+    };
+    const Case cases[] = {
+        {"A-->B", true, false, 1.0f, ""},
+        {"A ---> B", true, false, 1.0f, ""},
+        {"A---->B", true, false, 1.0f, ""},
+        {"A ==> B", true, false, 2.0f, ""},
+        {"A ===> B", true, false, 2.0f, ""},
+        {"A====>B", true, false, 2.0f, ""},
+        {"A -.-> B", true, true, 1.0f, ""},
+        {"A -..-> B", true, true, 1.0f, ""},
+        {"A-...->B", true, true, 1.0f, ""},
+        {"A --- B", false, false, 1.0f, ""},
+        {"A ---- B", false, false, 1.0f, ""},
+        {"A === B", false, false, 2.0f, ""},
+        {"A====B", false, false, 2.0f, ""},
+        {"A -.- B", false, true, 1.0f, ""},
+        {"A -..- B", false, true, 1.0f, ""},
+        {"A -- text --> B", true, false, 1.0f, "text"},
+        {"A -- text ---> B", true, false, 1.0f, "text"},
+        {"A-- a-b --->B", true, false, 1.0f, "a-b"},
+        {"A -- text --- B", false, false, 1.0f, "text"},
+        {"A == text ==> B", true, false, 2.0f, "text"},
+        {"A == text ===> B", true, false, 2.0f, "text"},
+        {"A == text === B", false, false, 2.0f, "text"},
+        {"A -. text .-> B", true, true, 1.0f, "text"},
+        {"A -. text ..-> B", true, true, 1.0f, "text"},
+        {"A -. text .- B", false, true, 1.0f, "text"},
+        {"A -. \"x .-> y\" ..-> B", true, true, 1.0f, "x .-> y"},
+        {"A ---->|text| B", true, false, 1.0f, "text"},
+        {"A ===>|a > b| B", true, false, 2.0f, "a > b"},
+        {"A ---> B>Text]", true, false, 1.0f, ""},
+        {"A>Text] ===> B", true, false, 2.0f, ""},
+        {"A -..-> B>\"c > d\"]", true, true, 1.0f, ""},
+    };
+    for (const auto& item : cases) {
+        const std::string name = std::string("'") + item.line + "'";
+        auto parsed = mermaid::parse(std::string("flowchart TD\n") + item.line + "\n");
+        check(parsed.success, (name + " parses").c_str());
+        if (!parsed.success) {
+            std::cerr << "  " << parsed.error << '\n';
+            continue;
+        }
+        const auto& diagram = parsed.diagram;
+        check(diagram.nodes.size() == 2 && findNode(diagram, "A") && findNode(diagram, "B"),
+              (name + " has nodes A and B, and no others").c_str());
+        const auto* edge = findEdge(diagram, "A", "B");
+        check(diagram.edges.size() == 1 && edge && edge->directed == item.directed &&
+                  edge->dashed == item.dashed && edge->strokeScale == item.strokeScale &&
+                  edge->label == item.label,
+              (name + " is the edge its short form draws").c_str());
+    }
+
+    // Mermaid's own example of a longer link
+    auto docs = mermaid::parse(
+        "flowchart TD\n"
+        "    A[Start] --> B{Is it?}\n"
+        "    B -->|Yes| C[OK]\n"
+        "    C --> D[Rethink]\n"
+        "    D --> B\n"
+        "    B ---->|No| E[End]\n");
+    const auto* no = docs.success ? findEdge(docs.diagram, "B", "E") : nullptr;
+    check(docs.success && docs.diagram.nodes.size() == 5 && docs.diagram.edges.size() == 5 &&
+              no && no->directed && no->label == "No",
+          "Mermaid's 'B ---->|No| E[End]' is an edge labelled No");
+
+    for (const char* line : {"A->B", "A -> B", "A --o B", "A --x B", "Ao--oB", "A o--o B",
+                             "A x--x B", "A<-->B", "A <--> B", "A ~~~ B", "A~~~B", "A---oB",
+                             "A ==x B", "A -.-o B", "A --o B --> C"}) {
+        auto parsed = mermaid::parse(std::string("flowchart LR\n") + line + "\n");
+        check(!parsed.success && parsed.error.find("edge") != std::string::npos,
+              (std::string("'") + line + "' shows its source").c_str());
+    }
+}
+
+// The asymmetric shape fixture: every fence parses, with its asymmetric nodes
+void testAsymmetricFixture() {
+    std::ifstream file(TINTA_MERMAID_ASYMMETRIC_FIXTURE, std::ios::binary);
+    check(static_cast<bool>(file), "asymmetric shape fixture opens");
+    const std::string markdown((std::istreambuf_iterator<char>(file)),
+                               std::istreambuf_iterator<char>());
+    const auto fences = mermaidFences(markdown);
+    const std::vector<std::string> expected = {"Route Screen", "S A C D", "Parse Out", "Flag Back",
+                                               "E", "Arrow Dotted DottedOpen ThickText"};
+    check(fences.size() == expected.size(), "the fixture has six Mermaid fences");
+    for (size_t i = 0; i < fences.size() && i < expected.size(); ++i) {
+        auto parsed = mermaid::parse(fences[i]);
+        if (!parsed.success) {
+            std::cerr << "  fence " << i + 1 << ':' << parsed.errorLine << ": " << parsed.error << '\n';
+        }
+        check(parsed.success && asymmetricIds(parsed.diagram) == expected[i],
+              ("fixture fence " + std::to_string(i + 1) + " has asymmetric nodes " +
+               expected[i]).c_str());
+    }
+}
+
 void testExtFallbacks() {
     auto sequence = mermaidext::build(
         mermaidext::Kind::Sequence,
@@ -382,10 +762,929 @@ void testExtFallbacks() {
         mermaidext::Kind::State,
         "stateDiagram-v2\n    state Outer {\n        [*] --> A\n    }\n",
         fakeMeasure, 1.0f);
-    check(!composite.ok, "composite states fall back");
+    check(composite.ok, "a composite state draws instead of falling back");
+    auto unclosed = mermaidext::build(
+        mermaidext::Kind::State,
+        "stateDiagram-v2\n    state Outer {\n        [*] --> A\n", fakeMeasure, 1.0f);
+    check(!unclosed.ok, "an unclosed composite state falls back");
+    auto stray = mermaidext::build(
+        mermaidext::Kind::State, "stateDiagram-v2\n    A --> B\n    }\n",
+        fakeMeasure, 1.0f);
+    check(!stray.ok, "a } with no composite open falls back");
+    auto across = mermaidext::build(
+        mermaidext::Kind::State,
+        "stateDiagram-v2\n    state P {\n        A --> B\n        --\n"
+        "        C --> D\n    }\n    A --> C\n",
+        fakeMeasure, 1.0f);
+    check(!across.ok, "a transition between concurrent regions falls back");
     auto pie = mermaidext::build(mermaidext::Kind::Pie,
                                  "pie\n    \"A\" : -3\n", fakeMeasure, 1.0f);
     check(!pie.ok, "negative pie values fall back");
+}
+
+// --- C4 relation labels ---
+// A relation's label sat on the middle of its line, so between two shapes
+// 24 px apart it covered both of them and their text, and the labels of
+// relations between the same shapes covered each other
+
+// Builds a C4 source and checks every label: clear of the boxes, frames,
+// captions, text, arrowheads and other labels, and on its own line
+mermaidext::Built checkC4Labels(const std::string& name,
+                                const std::string& source, float scale) {
+    auto built = mermaidext::build(mermaidext::Kind::C4, source, fakeMeasure,
+                                   scale);
+    const std::string at = name + (scale == 1.0f ? " at 1x" : " at 1.5x");
+    check(built.ok, (at + " builds").c_str());
+    if (!built.ok) {
+        std::cerr << "  (" << built.error << ")\n";
+        return built;
+    }
+    const auto problems = c4checks::labelProblems(built, source, scale);
+    for (const auto& problem : problems) {
+        std::cerr << "  " << at << ": " << problem << '\n';
+    }
+    check(problems.empty(),
+          (at + ": each label is clear of boxes, text, frames, arrowheads "
+                "and the other labels, on its own line").c_str());
+    return built;
+}
+
+// The lines drawn between two element boxes
+std::vector<const mermaidext::Prim*> linesBetween(const c4checks::Parts& parts,
+                                                  const c4checks::Box& a,
+                                                  const c4checks::Box& b) {
+    std::vector<const mermaidext::Prim*> lines;
+    for (const auto* line : parts.lines) {
+        mermaidext::Point p{line->x1, line->y1}, q{line->x2, line->y2};
+        if ((c4checks::onEdge(p, a) && c4checks::onEdge(q, b)) ||
+            (c4checks::onEdge(p, b) && c4checks::onEdge(q, a))) {
+            lines.push_back(line);
+        }
+    }
+    return lines;
+}
+
+const char* const kC4Reported = R"(C4Context
+    title Tinta in context
+    Person(writer, "Writer", "Reads and edits Markdown")
+    System(tinta, "Tinta", "Native Markdown viewer and editor")
+    System_Ext(plantuml, "PlantUML", "Optional diagram tool")
+    System_Ext(github, "GitHub Releases", "Update check for portable builds")
+    Rel(writer, tinta, "Opens files in")
+    Rel(tinta, plantuml, "Renders diagrams with")
+    Rel(tinta, github, "Checks for updates")
+)";
+
+void testC4ReportedLabels() {
+    for (float scale : {1.0f, 1.5f}) {
+        auto built = checkC4Labels("reported diagram", kC4Reported, scale);
+        if (!built.ok) continue;
+        auto parts = c4checks::partsOf(built);
+        c4checks::Box writer, tinta, plantuml, github, opens, renders, updates;
+        bool found = c4checks::elementBox(parts, "Writer", writer) &&
+                     c4checks::elementBox(parts, "Tinta", tinta) &&
+                     c4checks::elementBox(parts, "PlantUML", plantuml) &&
+                     c4checks::elementBox(parts, "GitHub Releases", github) &&
+                     c4checks::chipBox(parts, "Opens files in", opens) &&
+                     c4checks::chipBox(parts, "Renders diagrams with", renders) &&
+                     c4checks::chipBox(parts, "Checks for updates", updates);
+        check(found, "the reported diagram draws its boxes and labels");
+        if (!found) continue;
+        // The gaps widen to hold the labels, which keep to the free space
+        check(opens.x1 > writer.x2 && opens.x2 < tinta.x1,
+              "\"Opens files in\" sits between Writer and Tinta");
+        check(renders.x1 > tinta.x2 && renders.x2 < plantuml.x1,
+              "\"Renders diagrams with\" sits between Tinta and PlantUML");
+        check(updates.y1 > tinta.y2 && updates.y2 < github.y1,
+              "\"Checks for updates\" sits between Tinta and GitHub Releases");
+        check(!c4checks::overlaps(opens, tinta) &&
+                  !c4checks::overlaps(renders, tinta),
+              "no label covers the Tinta box or its description");
+    }
+}
+
+void testC4LabelLayouts() {
+    struct Case {
+        const char* name;
+        const char* source;
+    };
+    const Case kCases[] = {
+        {"direction keywords", R"(C4Container
+    Container(a, "Alpha", "Go")
+    Container(b, "Beta", "Go")
+    Container(c, "Gamma", "Go")
+    Container(d, "Delta", "Go")
+    Container(e, "Epsilon", "Go")
+    Container(f, "Zeta", "Go")
+    Rel_R(a, b, "Right to")
+    Rel_Right(b, c, "Right again")
+    Rel_L(c, b, "Left to")
+    Rel_Left(b, a, "Left again")
+    Rel_D(a, d, "Down to")
+    Rel_Down(b, e, "Down again")
+    Rel_U(f, c, "Up to")
+    Rel_Up(e, b, "Up again")
+    Rel_Back(d, e, "Back to")
+    Rel_Neighbor(e, f, "Next to")
+)"},
+        {"BiRel", R"(C4Context
+    System(shop, "Bookshop", "Sells books online")
+    System_Ext(warehouse, "Warehouse", "Picks and ships orders")
+    System_Ext(publisher, "Publisher feed", "New titles and prices")
+    System_Ext(accounting, "Accounting", "Invoices and ledgers")
+    BiRel(shop, warehouse, "Syncs stock with", "EDI")
+    Rel(warehouse, shop, "Reports shipments to")
+    Rel(publisher, warehouse, "Announces new titles to")
+    BiRel(shop, accounting, "Exchanges invoices with")
+    BiRel(accounting, warehouse, "Reconciles stock with")
+)"},
+        {"nested boundaries", R"(C4Container
+    title Nested boundaries
+    Person(customer, "Customer", "Orders books")
+    Enterprise_Boundary(company, "Bookshop Ltd") {
+        System_Boundary(shop, "Bookshop") {
+            Container(web, "Web shop", "TypeScript", "Catalogue")
+            Container(api, "Shop API", "Go", "Orders")
+            Container(admin, "Back office", "Django")
+            ContainerDb(db, "Orders", "PostgreSQL", "Orders and stock")
+        }
+        Boundary(ops, "Operations", "team") {
+            Container(jobs, "Jobs", "Go", "Nightly work")
+        }
+    }
+    System_Ext(pay, "Payment provider")
+    Rel(customer, web, "Orders through", "HTTPS")
+    Rel(web, api, "Calls", "JSON")
+    Rel(api, db, "Stores orders in", "SQL")
+    Rel(admin, api, "Manages stock with")
+    Rel(jobs, db, "Archives old orders in")
+    Rel(api, pay, "Charges cards with")
+    Rel(pay, customer, "Sends receipts to")
+)"},
+        {"three rows", R"(C4Component
+    Container(spa, "Single-page app", "TypeScript", "Runs in the browser")
+    Component(router, "Router", "Go", "Maps URLs to handlers")
+    Component(auth, "Auth", "Go", "Checks sessions")
+    Component(catalogue, "Catalogue", "Go", "Lists and searches books")
+    Component(basket, "Basket", "Go", "Holds chosen books")
+    Component(orders, "Orders", "Go", "Turns baskets into orders")
+    ComponentDb(store, "Store", "PostgreSQL", "Books and orders")
+    ComponentQueue(events, "Events", "NATS", "Order events")
+    Rel(spa, router, "Sends requests to", "JSON/HTTPS")
+    Rel(router, auth, "Checks sessions with")
+    Rel(router, catalogue, "Routes searches to")
+    Rel(router, basket, "Routes basket edits to")
+    Rel(basket, orders, "Checks out through")
+    Rel(catalogue, store, "Reads books from", "SQL")
+    Rel(orders, store, "Writes orders to", "SQL")
+    Rel(orders, events, "Publishes to")
+    Rel(auth, events, "Logs sign-ins to")
+    Rel(spa, auth, "Refreshes tokens with")
+)"},
+        {"dense neighbours", R"(C4Container
+    Person(user, "User", "Reads and writes")
+    Container(spa, "Single-page app", "TypeScript")
+    Container(api, "API", "Go")
+    ContainerDb(db, "Documents", "PostgreSQL")
+    ContainerQueue(bus, "Event bus", "Kafka")
+    Container(worker, "Indexer", "Go")
+    Rel(user, spa, "Edits in")
+    Rel(spa, user, "Shows changes to")
+    Rel(spa, api, "Saves through", "JSON/HTTPS")
+    Rel(api, spa, "Pushes edits to", "WebSocket")
+    BiRel(spa, api, "Keeps a session with")
+    Rel(api, db, "Reads and writes", "SQL")
+    Rel(db, api, "Notifies", "LISTEN")
+    Rel(api, bus, "Publishes changes to")
+    Rel(bus, worker, "Feeds")
+    Rel(worker, bus, "Acknowledges")
+    BiRel(worker, api, "Reports progress to")
+)"},
+        {"fan-out", R"(C4Context
+    System(left, "Left", "Beside the person")
+    Person(person, "Person", "Uses everything")
+    System(right, "Right", "Beside the person")
+    System(a, "A", "Below, left")
+    System(b, "B", "Below, middle")
+    System(c, "C", "Below, right")
+    Rel(person, a, "Uses A for this")
+    Rel(person, b, "Uses B for that")
+    Rel(person, c, "Uses C for the rest")
+    Rel(person, left, "Talks to")
+    Rel(person, right, "Talks to as well")
+    Rel(left, a, "Feeds")
+)"},
+        {"deployment", R"(C4Deployment
+    Deployment_Node(laptop, "Laptop", "Windows 11") {
+        Deployment_Node(folder, "Portable folder", "tinta.exe") {
+            Container(viewer, "Viewer", "C++17", "Draws Markdown")
+            Container(settings, "Settings", "INI file")
+        }
+        Node(java, "Java", "OpenJDK") {
+            Container(plantuml, "PlantUML", "Java")
+        }
+    }
+    Node_R(cloud, "GitHub", "Cloud") {
+        Container(releases, "Releases", "JSON API")
+    }
+    Node_L(spare, "Spare node")
+    Rel(viewer, settings, "Reads", "INI")
+    Rel(viewer, plantuml, "Renders through", "stdin")
+    Rel(viewer, releases, "Checks for updates", "HTTPS")
+)"},
+        {"self relation", R"(C4Container
+    Container(api, "API", "Go", "Serves requests")
+    Container(db, "Store", "SQL")
+    Rel(api, api, "Retries failed calls")
+    Rel(api, db, "Reads")
+    Rel(db, db, "Vacuums")
+)"},
+    };
+    for (const auto& testCase : kCases) {
+        for (float scale : {1.0f, 1.5f}) {
+            checkC4Labels(testCase.name, testCase.source, scale);
+        }
+    }
+
+    // Relations between the same two shapes get lines of their own, side
+    // by side, rather than one line under two labels
+    auto dense = mermaidext::build(mermaidext::Kind::C4, kCases[4].source,
+                                   fakeMeasure, 1.0f);
+    auto parts = c4checks::partsOf(dense);
+    c4checks::Box spa, api, user;
+    if (c4checks::elementBox(parts, "Single-page app", spa) &&
+        c4checks::elementBox(parts, "API", api) &&
+        c4checks::elementBox(parts, "User", user)) {
+        auto threeLanes = linesBetween(parts, spa, api);
+        auto twoLanes = linesBetween(parts, user, spa);
+        // BiRel draws its line twice, once per arrowhead
+        check(threeLanes.size() == 4 && twoLanes.size() == 2,
+              "each relation between two shapes has its own line");
+        bool apart = true;
+        for (const auto* lanes : {&threeLanes, &twoLanes}) {
+            for (size_t i = 0; i < lanes->size(); i++) {
+                for (size_t j = i + 1; j < lanes->size(); j++) {
+                    const auto* p = (*lanes)[i];
+                    const auto* q = (*lanes)[j];
+                    bool reversed = p->x1 == q->x2 && p->y1 == q->y2 &&
+                                    p->x2 == q->x1 && p->y2 == q->y1;
+                    if (!reversed && std::abs(p->y1 - q->y1) < 10.0f &&
+                        std::abs(p->y2 - q->y2) < 10.0f) {
+                        apart = false;
+                    }
+                }
+            }
+        }
+        check(apart, "lanes between the same two shapes run apart");
+    } else {
+        check(false, "the dense diagram draws its boxes");
+    }
+
+    // A relation passing behind a box keeps a lane beside the relation that
+    // ends at that box, so neither label sits on the other's line
+    {
+        auto rows = mermaidext::build(mermaidext::Kind::C4, kCases[3].source,
+                                      fakeMeasure, 1.0f);
+        auto rowParts = c4checks::partsOf(rows);
+        c4checks::Box browser, router, auth;
+        bool found =
+            c4checks::elementBox(rowParts, "Single-page app", browser) &&
+            c4checks::elementBox(rowParts, "Router", router) &&
+            c4checks::elementBox(rowParts, "Auth", auth);
+        auto toRouter = linesBetween(rowParts, browser, router);
+        auto toAuth = linesBetween(rowParts, browser, auth);
+        check(found && toRouter.size() == 1 && toAuth.size() == 1 &&
+                  std::abs(toRouter[0]->y1 - toAuth[0]->y1) >= 10.0f,
+              "a line passing behind a box runs beside the line ending there");
+    }
+
+    // Without labels the layout keeps its 24 px and 26 px gaps
+    const char* plain = R"(C4Context
+    Person(a, "A")
+    System(b, "B")
+    System(c, "C")
+    System(d, "D")
+    Rel(a, b, "")
+    Rel(a, d, "")
+)";
+    auto unlabelled =
+        mermaidext::build(mermaidext::Kind::C4, plain, fakeMeasure, 1.0f);
+    auto plainParts = c4checks::partsOf(unlabelled);
+    c4checks::Box a, b, c, d;
+    check(c4checks::elementBox(plainParts, "A", a) &&
+              c4checks::elementBox(plainParts, "B", b) &&
+              c4checks::elementBox(plainParts, "C", c) &&
+              c4checks::elementBox(plainParts, "D", d) &&
+              std::abs(b.x1 - a.x2 - 24.0f) < 0.01f &&
+              std::abs(c.x1 - b.x2 - 24.0f) < 0.01f &&
+              std::abs(d.y1 - std::max({a.y2, b.y2, c.y2}) - 26.0f) < 0.01f &&
+              plainParts.chips.empty(),
+          "a diagram without labels keeps its gaps");
+
+    // The last resort: a loop on an element boxed in by its own boundary's
+    // frame and a close neighbour takes its label off to the right of the
+    // diagram, joined to the loop by a leader
+    const char* boxedIn = R"(C4Context
+    System_Boundary(box, "Box") {
+        System(alone, "Alone", "Alone in its boundary")
+    }
+    System(next, "Next", "Right beside it")
+    Rel(alone, alone, "Checks itself")
+)";
+    auto spilled = checkC4Labels("boxed-in loop", boxedIn, 1.0f);
+    auto spilledParts = c4checks::partsOf(spilled);
+    c4checks::Box chip, next;
+    check(c4checks::chipBox(spilledParts, "Checks itself", chip) &&
+              c4checks::elementBox(spilledParts, "Next", next) &&
+              chip.x1 > next.x2 && chip.x2 <= spilled.width,
+          "a label with no room left goes right of the diagram");
+}
+
+// The fixture's diagrams, among other Markdown, all keep their labels clear
+void testC4LabelFixture() {
+    std::ifstream file(TINTA_MERMAID_C4_FIXTURE, std::ios::binary);
+    check(static_cast<bool>(file), "C4 label fixture opens");
+    const std::string markdown((std::istreambuf_iterator<char>(file)),
+                               std::istreambuf_iterator<char>());
+    const auto fences = mermaidFences(markdown);
+    check(fences.size() == 8, "the C4 label fixture has its eight diagrams");
+    for (size_t i = 0; i < fences.size(); i++) {
+        check(mermaidext::detectKind(fences[i]) == mermaidext::Kind::C4,
+              "every fixture fence is a C4 diagram");
+        for (float scale : {1.0f, 1.5f}) {
+            checkC4Labels("fixture fence " + std::to_string(i + 1), fences[i],
+                          scale);
+        }
+    }
+}
+
+// Crowded diagrams: eight rows of elements, each related to the next three,
+// so lines cross every row and gap; and sixteen relations between the same
+// two elements, more lanes than their boxes can hold apart
+void testC4CrowdedLabels() {
+    std::string rows = "C4Container\n";
+    for (int i = 0; i < 24; i++) {
+        rows += "Container(e" + std::to_string(i) + ", \"Element " +
+                std::to_string(i) + "\", \"Go\", \"Does part " +
+                std::to_string(i) + " of the work\")\n";
+    }
+    for (int i = 0; i < 24; i++) {
+        for (int step = 1; step <= 3 && i + step < 24; step++) {
+            rows += "Rel(e" + std::to_string(i) + ", e" +
+                    std::to_string(i + step) + ", \"Calls " +
+                    std::to_string(i) + " to " + std::to_string(i + step) +
+                    "\", \"JSON\")\n";
+        }
+    }
+    checkC4Labels("eight crowded rows", rows, 1.0f);
+
+    std::string pair = "C4Container\n"
+                       "Container(a, \"Client\", \"Go\")\n"
+                       "Container(b, \"Server\", \"Go\")\n";
+    for (int i = 0; i < 16; i++) {
+        pair += "Rel(" + std::string(i % 2 ? "b, a" : "a, b") +
+                ", \"Message " + std::to_string(i) + "\", \"HTTPS\")\n";
+    }
+    checkC4Labels("sixteen relations between two elements", pair, 1.0f);
+}
+
+// --- state, class and ER layouts: nothing drawn over anything else ---
+
+using mermaidcheck::Box;
+using mermaidcheck::hasText;
+using mermaidcheck::overlap;
+using mermaidcheck::textBox;
+
+// Prints what collides in a diagram under `name` (see mermaid_layout_checks.h)
+void checkLayout(const std::string& name, const mermaidext::Built& built, float scale,
+                 bool state = true) {
+    auto problems = mermaidcheck::layoutProblems(built, scale, state);
+    for (size_t i = 0; i < problems.size() && i < 12; i++) {
+        std::cerr << "  " << name << ": " << problems[i] << '\n';
+    }
+    check(problems.empty(), ("nothing overlaps in " + name).c_str());
+}
+
+std::string withDirection(const std::string& source, const char* direction) {
+    size_t newline = source.find('\n');
+    return source.substr(0, newline + 1) + "    direction " + direction + "\n" +
+           source.substr(newline + 1);
+}
+
+// fakeMeasure at a zoom, as the app measures text at its scale
+mermaidext::Measure scaledMeasure(float scale) {
+    return [scale](const std::string& text, const mermaidext::TextStyle& style,
+                   float wrap) {
+        mermaidext::Size size = fakeMeasure(text, style, wrap);
+        return mermaidext::Size{size.w * scale, size.h * scale};
+    };
+}
+
+// Closer to the app's text: a 14 px font scaled by the style and zoom,
+// uneven glyph widths, and wrapping at the given width
+mermaidext::Measure proportionalMeasure(float scale) {
+    return [scale](const std::string& text, const mermaidext::TextStyle& style,
+                   float wrap) {
+        float font = 14.0f * style.scale * scale * (style.bold ? 1.04f : 1.0f);
+        float lineWidth = 0.0f;
+        float widest = 0.0f;
+        int lines = text.empty() ? 0 : 1;
+        for (char c : text) {
+            if (c == '\n') {
+                lines++;
+                lineWidth = 0.0f;
+                continue;
+            }
+            float glyph = font * (c == ' '                                         ? 0.28f
+                                  : std::isupper(static_cast<unsigned char>(c)) ? 0.63f
+                                                                                : 0.513f);
+            if (wrap > 0.0f && lineWidth + glyph > wrap) {
+                lines++;
+                lineWidth = 0.0f;
+            }
+            lineWidth += glyph;
+            widest = std::max(widest, lineWidth);
+        }
+        return mermaidext::Size{widest, static_cast<float>(lines) * font * 1.3301f};
+    };
+}
+
+const char* const kStateRepro = R"(stateDiagram-v2
+    [*] --> Reading
+    Reading --> Editing : press colon
+    Editing --> Reading : Esc Esc
+    Editing --> Saving : Ctrl+S
+    Saving --> Editing
+    Reading --> Searching : F
+    Searching --> Reading : Esc
+    Reading --> [*] : Q
+    note right of Editing : Source on the left, preview on the right
+)";
+
+// A back edge and a note beside a state with neighbours: the label chip,
+// the note and the edge all landed on "Searching"
+void testStateOverlapRepro() {
+    const char* const kDirections[] = {"TB", "LR", "BT", "RL"};
+    for (float scale : {1.0f, 1.75f}) {
+        for (const char* direction : kDirections) {
+            std::string source = std::string(direction) == "TB"
+                                     ? std::string(kStateRepro)
+                                     : withDirection(kStateRepro, direction);
+            auto built = mermaidext::build(mermaidext::Kind::State, source,
+                                           scaledMeasure(scale), scale);
+            std::string name = std::string("repro ") + direction + " at " +
+                               std::to_string(scale).substr(0, 4);
+            checkLayout(name, built, scale);
+            Box searching = textBox(built, "Searching");
+            check(!overlap(textBox(built, "Esc Esc"), searching),
+                  "the Esc Esc label clears Searching");
+            check(!overlap(textBox(built, "Source on the left, preview on the right"),
+                           searching),
+                  "the note clears Searching");
+        }
+    }
+}
+
+// Machines with self-loops, notes on both sides and stacked on one state,
+// choices, forks and joins, long labels, and edges back over many ranks
+void testStateMachines() {
+    const char* const kMachines[] = {
+        R"(stateDiagram-v2
+    [*] --> Stopped
+    Stopped --> Playing : play
+    Playing --> Paused : pause
+    Paused --> Playing : resume
+    Playing --> Stopped : stop
+    Paused --> Stopped : stop
+    Playing --> Playing : next track
+    Stopped --> [*] : eject
+    note left of Paused : Position is kept
+    note right of Playing : Volume keys work here
+)",
+        R"(stateDiagram-v2
+    state check <<choice>>
+    state split <<fork>>
+    state merge <<join>>
+    [*] --> Received
+    Received --> check : validate
+    check --> Rejected : invalid
+    check --> split : valid
+    split --> Packing
+    split --> Billing
+    Packing --> merge
+    Billing --> merge
+    merge --> Shipped
+    Shipped --> Delivered : signed for
+    Shipped --> Received : returned to sender
+    Rejected --> [*]
+    Delivered --> [*]
+    Received --> Cancelled : customer cancels before packing
+    Cancelled --> [*]
+)",
+        R"(stateDiagram-v2
+    direction LR
+    [*] --> Idle
+    Idle --> Connecting : dial
+    Connecting --> Connected : handshake ok
+    Connecting --> Idle : timeout
+    Connecting --> Connecting : retry
+    Connected --> Idle : hang up
+    Connected --> Error : lost carrier
+    Error --> Connecting : redial
+    Error --> Idle : give up
+    Idle --> [*]
+    note right of Connecting : Three tries at most
+    note left of Connected : Keep-alive every 30 s
+)",
+        R"(stateDiagram-v2
+    [*] --> A
+    A --> B : one
+    A --> C : two
+    A --> D : three
+    B --> E : four
+    C --> E : five
+    D --> E : six
+    E --> A : back to the start
+    E --> B : again
+    D --> A : undo
+    C --> C : stay
+    C --> C : and stay
+    B --> F : skip ahead
+    E --> F : finish
+    F --> [*]
+    A --> F : shortcut over everything
+    note right of E : first note
+    note right of E : second note on the same state
+    note left of A : notes on both sides
+)",
+        R"(stateDiagram-v2
+    direction BT
+    s1 : A state with
+    s1 : two descriptions
+    [*] --> s1
+    s1 --> s2 : a long transition label that is wider than any state
+    s2 --> s3
+    s3 --> s1 : back
+    s2 --> s2 : loop
+    s3 --> [*]
+    note left of s2 : left of s2
+)",
+    };
+    const char* const kDirections[] = {"", "LR", "BT", "RL"};
+    size_t index = 0;
+    for (const char* machine : kMachines) {
+        index++;
+        for (const char* direction : kDirections) {
+            std::string source = *direction ? withDirection(machine, direction)
+                                            : std::string(machine);
+            for (float scale : {1.0f, 1.75f}) {
+                auto built = mermaidext::build(mermaidext::Kind::State, source,
+                                               scaledMeasure(scale), scale);
+                checkLayout("machine " + std::to_string(index) + " " +
+                                (*direction ? direction : "as written") + " at " +
+                                std::to_string(scale).substr(0, 4),
+                            built, scale);
+            }
+            // Uneven text at uneven zooms, as printing and the HTML export
+            // lay diagrams out; an exact lane spacing once looped forever
+            for (float scale : {0.7f, 0.8333f, 1.15f, 1.37f}) {
+                auto built = mermaidext::build(mermaidext::Kind::State, source,
+                                               proportionalMeasure(scale), scale);
+                checkLayout("machine " + std::to_string(index) + " " +
+                                (*direction ? direction : "as written") +
+                                " with real text at " + std::to_string(scale).substr(0, 4),
+                            built, scale);
+            }
+        }
+    }
+}
+
+// The box drawn for a composite state, found by the name in its header
+Box containerNamed(const mermaidext::Built& built, const std::string& name, float scale) {
+    using mermaidext::PrimType;
+    using mermaidext::Role;
+    for (const auto& prim : built.prims) {
+        if (prim.type != PrimType::RoundRect || prim.fill != Role::None ||
+            prim.stroke != Role::Stroke) {
+            continue;
+        }
+        Box box{prim.x1, prim.y1, prim.x2, prim.y2};
+        for (const auto& text : built.prims) {
+            if (text.type == PrimType::Text && text.text == name &&
+                mermaidcheck::within({text.x1, text.y1, text.x2, text.y2}, box) &&
+                text.y1 < box.top + 10.0f * scale) {
+                return box;
+            }
+        }
+    }
+    return {};
+}
+
+bool drawn(const Box& box) { return box.right > box.left; }
+
+// Start dots and end rings inside `box`, and outside it
+struct Ends {
+    int startsIn = 0;
+    int startsOut = 0;
+    int endsIn = 0;
+    int endsOut = 0;
+};
+
+Ends endsAround(const mermaidext::Built& built, const Box& box) {
+    using mermaidext::PrimType;
+    using mermaidext::Role;
+    std::vector<Box> rings;
+    std::vector<Box> dots;
+    for (const auto& prim : built.prims) {
+        if (prim.type != PrimType::Ellipse) continue;
+        Box shape{prim.x1, prim.y1, prim.x2, prim.y2};
+        if (prim.stroke == Role::Accent) rings.push_back(shape);
+        else if (prim.fill == Role::Accent) dots.push_back(shape);
+    }
+    Ends ends;
+    for (const Box& ring : rings) {
+        (mermaidcheck::within(ring, box) ? ends.endsIn : ends.endsOut)++;
+    }
+    for (const Box& dot : dots) {
+        bool inRing = false;
+        for (const Box& ring : rings) inRing = inRing || mermaidcheck::within(dot, ring);
+        if (!inRing) (mermaidcheck::within(dot, box) ? ends.startsIn : ends.startsOut)++;
+    }
+    return ends;
+}
+
+// Transitions that reach the border of `box` from outside it: they start
+// on it, or stop an arrowhead short of it
+int endsOnBorder(const mermaidext::Built& built, const Box& box, float scale) {
+    float reach = 8.5f * scale;
+    int count = 0;
+    for (const auto& line : mermaidcheck::shapesOf(built, scale, true).lines) {
+        for (int side = 0; side < 2; side++) {
+            const mermaidext::Point& end = side ? line.b : line.a;
+            const mermaidext::Point& other = side ? line.a : line.b;
+            bool alongX = end.x > box.left - 0.5f && end.x < box.right + 0.5f;
+            bool alongY = end.y > box.top - 0.5f && end.y < box.bottom + 0.5f;
+            bool atBorder =
+                (alongX && ((end.y <= box.top + 0.5f && end.y >= box.top - reach) ||
+                            (end.y >= box.bottom - 0.5f && end.y <= box.bottom + reach))) ||
+                (alongY && ((end.x <= box.left + 0.5f && end.x >= box.left - reach) ||
+                            (end.x >= box.right - 0.5f && end.x <= box.right + reach)));
+            if (atBorder && mermaidcheck::outside(other, box)) count++;
+        }
+    }
+    return count;
+}
+
+// Dashed lines between concurrent regions inside `box`
+int dividersIn(const mermaidext::Built& built, const Box& box, float scale) {
+    int count = 0;
+    for (const auto& prim : built.prims) {
+        if (prim.type == mermaidext::PrimType::Line && prim.dashed &&
+            prim.stroke == mermaidext::Role::Muted && prim.strokeWidth < 1.2f * scale &&
+            mermaidcheck::within({std::min(prim.x1, prim.x2), std::min(prim.y1, prim.y2),
+                                  std::max(prim.x1, prim.x2), std::max(prim.y1, prim.y2)},
+                                 box)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+const char* const kCompositeExample = R"(stateDiagram-v2
+    [*] --> Reading
+    Reading --> Editing : press colon
+    Editing --> Reading : Esc Esc
+    state Editing {
+        [*] --> Typing
+        Typing --> Selecting : Shift+arrows
+        Selecting --> Typing
+    }
+    Reading --> [*] : Q
+)";
+
+// Composite states draw as a box with their name over their own diagram,
+// with its own start and end; transitions to the composite end on its
+// border, and nothing crosses it
+void testCompositeStates() {
+    const char* const kDirections[] = {"", "LR", "BT", "RL"};
+    for (float scale : {1.0f, 1.75f}) {
+        for (const char* direction : kDirections) {
+            std::string source = *direction ? withDirection(kCompositeExample, direction)
+                                            : std::string(kCompositeExample);
+            auto built = mermaidext::build(mermaidext::Kind::State, source,
+                                           scaledMeasure(scale), scale);
+            std::string name = std::string("composite example ") +
+                               (*direction ? direction : "TB") + " at " +
+                               std::to_string(scale).substr(0, 4);
+            checkLayout(name, built, scale);
+            Box editing = containerNamed(built, "Editing", scale);
+            check(drawn(editing), "Editing draws as a box around its states");
+            check(mermaidcheck::within(textBox(built, "Typing"), editing) &&
+                      mermaidcheck::within(textBox(built, "Selecting"), editing),
+                  "Typing and Selecting are inside Editing");
+            check(!overlap(textBox(built, "Reading"), editing), "Reading is outside Editing");
+            Ends ends = endsAround(built, editing);
+            check(ends.startsIn == 1 && ends.startsOut == 1 && ends.endsOut == 1 &&
+                      ends.endsIn == 0,
+                  "Editing's own start is inside it, apart from the diagram's start and end");
+            check(endsOnBorder(built, editing, scale) >= 2,
+                  "the transitions to and from Editing end on its border");
+            check(hasText(built, "Shift+arrows") &&
+                      mermaidcheck::within(textBox(built, "Shift+arrows"), editing),
+                  "the inner label is inside Editing");
+        }
+    }
+
+    // Nesting three deep, as in Mermaid's documentation
+    const char* const kNested = R"(stateDiagram-v2
+    [*] --> First
+    state First {
+        [*] --> Second
+        state Second {
+            [*] --> second
+            second --> Third
+            state Third {
+                [*] --> third
+                third --> [*]
+            }
+        }
+    }
+    First --> [*]
+)";
+    // Concurrent regions, as in Mermaid's documentation
+    const char* const kConcurrent = R"(stateDiagram-v2
+    [*] --> Active
+    state Active {
+        [*] --> NumLockOff
+        NumLockOff --> NumLockOn : EvNumLockPressed
+        NumLockOn --> NumLockOff : EvNumLockPressed
+        --
+        [*] --> CapsLockOff
+        CapsLockOff --> CapsLockOn : EvCapsLockPressed
+        CapsLockOn --> CapsLockOff : EvCapsLockPressed
+        --
+        [*] --> ScrollLockOff
+        ScrollLockOff --> ScrollLockOn : EvScrollLockPressed
+        ScrollLockOn --> ScrollLockOff : EvScrollLockPressed
+    }
+    Active --> [*] : power off
+)";
+    // A long name, its own direction, notes inside and on it, a loop on
+    // it, and transitions between states outside and inside it
+    const char* const kAcross = R"(stateDiagram-v2
+    direction LR
+    [*] --> Idle
+    state "Text editing" as Editing {
+        direction LR
+        [*] --> Typing
+        Typing --> Selecting : Shift+arrows
+        Selecting --> Typing : any key
+        Typing --> [*] : Esc
+        note right of Typing : Caret visible
+    }
+    Idle --> Typing : open file
+    Selecting --> Idle : close
+    Editing --> Saving : Ctrl+S
+    Saving --> Editing
+    Editing --> Editing : undo
+    note left of Editing : Edit mode
+    Saving --> [*]
+)";
+    // The diagram itself split into regions
+    const char* const kTopRegions = R"(stateDiagram-v2
+    [*] --> Left
+    Left --> [*]
+    --
+    [*] --> Right
+    Right --> Right : tick
+)";
+    for (float scale : {1.0f, 1.75f}) {
+        for (const char* direction : kDirections) {
+            auto variant = [&](const char* source) {
+                return *direction ? withDirection(source, direction) : std::string(source);
+            };
+            std::string suffix = std::string(" ") + (*direction ? direction : "as written") +
+                                 " at " + std::to_string(scale).substr(0, 4);
+            auto measure = scaledMeasure(scale);
+
+            auto nested = mermaidext::build(mermaidext::Kind::State, variant(kNested),
+                                            measure, scale);
+            checkLayout("nested composites" + suffix, nested, scale);
+            Box first = containerNamed(nested, "First", scale);
+            Box second = containerNamed(nested, "Second", scale);
+            Box third = containerNamed(nested, "Third", scale);
+            check(drawn(first) && drawn(second) && drawn(third) &&
+                      mermaidcheck::within(second, first) &&
+                      mermaidcheck::within(third, second) &&
+                      mermaidcheck::within(textBox(nested, "third"), third),
+                  "nested composites sit inside each other");
+            Ends thirdEnds = endsAround(nested, third);
+            check(thirdEnds.startsIn == 1 && thirdEnds.endsIn == 1,
+                  "the innermost composite has its own start and end");
+
+            auto concurrent = mermaidext::build(mermaidext::Kind::State,
+                                                variant(kConcurrent), measure, scale);
+            checkLayout("concurrent regions" + suffix, concurrent, scale);
+            Box active = containerNamed(concurrent, "Active", scale);
+            check(drawn(active) && dividersIn(concurrent, active, scale) == 2,
+                  "three concurrent regions are parted by two dashed lines");
+            Ends activeEnds = endsAround(concurrent, active);
+            check(activeEnds.startsIn == 3, "each concurrent region has its own start");
+            // No state of one region lies across a divider
+            for (const auto& prim : concurrent.prims) {
+                if (prim.type != mermaidext::PrimType::Line || !prim.dashed ||
+                    prim.strokeWidth > 1.2f * scale) {
+                    continue;
+                }
+                mermaidcheck::Segment divider{{prim.x1, prim.y1}, {prim.x2, prim.y2}};
+                for (const char* state : {"NumLockOff", "CapsLockOn", "ScrollLockOff"}) {
+                    check(!mermaidcheck::pierces(divider, textBox(concurrent, state)),
+                          "a divider passes between the regions' states");
+                }
+            }
+
+            auto across = mermaidext::build(mermaidext::Kind::State, variant(kAcross),
+                                            measure, scale);
+            checkLayout("transitions across a composite" + suffix, across, scale);
+            Box editing = containerNamed(across, "Text editing", scale);
+            check(drawn(editing) && mermaidcheck::within(textBox(across, "Typing"), editing),
+                  "a composite named with as shows its long name");
+            check(!overlap(textBox(across, "Idle"), editing) &&
+                      endsOnBorder(across, editing, scale) >= 5,
+                  "transitions from outside to states inside end on the composite");
+            check(mermaidcheck::within(textBox(across, "Caret visible"), editing) &&
+                      !overlap(textBox(across, "Edit mode"), editing),
+                  "a note on an inner state is inside, a note on the composite outside");
+
+            auto top = mermaidext::build(mermaidext::Kind::State, variant(kTopRegions),
+                                         measure, scale);
+            checkLayout("concurrent diagram" + suffix, top, scale);
+            check(dividersIn(top, {0.0f, 0.0f, top.width, top.height}, scale) == 1,
+                  "a diagram split by -- draws a dashed line between its regions");
+
+            // A transition into a state two composites deep ends on the
+            // outer one, also when it names the state before the composite
+            // that holds it; an empty composite is a box with its name
+            const std::string nestedBody =
+                std::string(kNested).substr(std::string(kNested).find('\n') + 1);
+            const std::string deepSource =
+                "stateDiagram-v2\n    [*] --> Idle\n    Idle --> third : jump\n" + nestedBody +
+                "    state Empty {\n    }\n    Idle --> Empty\n";
+            auto deep = mermaidext::build(mermaidext::Kind::State, variant(deepSource.c_str()),
+                                          measure, scale);
+            checkLayout("transition two composites deep" + suffix, deep, scale);
+            Box outer = containerNamed(deep, "First", scale);
+            check(drawn(outer) && !overlap(textBox(deep, "Idle"), outer) &&
+                      endsOnBorder(deep, outer, scale) >= 1,
+                  "a transition into a nested state ends on the outermost composite");
+            check(mermaidcheck::within(textBox(deep, "third"),
+                                       containerNamed(deep, "Third", scale)),
+                  "a state named at the top first still belongs to its composite");
+            check(drawn(containerNamed(deep, "Empty", scale)),
+                  "an empty composite draws as a box with its name");
+        }
+    }
+}
+
+// Class and ER diagrams share the router: their edges and chips keep clear
+// too, with markers and multiplicities at both ends
+void testClassAndErLayouts() {
+    const char* const kClass = R"(classDiagram
+    Animal <|-- Duck
+    Animal <|-- Fish
+    Animal <|-- Zebra
+    Animal : +int age
+    Animal : +isMammal()
+    Duck : +swim()
+    Fish : +swim()
+    Zebra : +run()
+    Duck "1" --> "*" Pond : lives in
+    Pond --> Duck : feeds
+    Zebra --> Zebra : herds with
+    Pond ..> Animal : waters
+)";
+    const char* const kEr = R"(erDiagram
+    CUSTOMER ||--o{ ORDER : places
+    CUSTOMER ||--o{ ADDRESS : has
+    ORDER ||--|{ LINE-ITEM : contains
+    LINE-ITEM }o--|| PRODUCT : describes
+    PRODUCT ||--o{ CUSTOMER : "recommended to"
+    CUSTOMER {
+        string name PK
+        string email
+    }
+)";
+    for (float scale : {1.0f, 1.75f}) {
+        auto classes = mermaidext::build(mermaidext::Kind::Class, kClass,
+                                         scaledMeasure(scale), scale);
+        checkLayout("class diagram", classes, scale, false);
+        check(hasText(classes, "lives in") && hasText(classes, "*"),
+              "class labels and multiplicities are drawn");
+        auto entities = mermaidext::build(mermaidext::Kind::Er, kEr,
+                                          scaledMeasure(scale), scale);
+        checkLayout("ER diagram", entities, scale, false);
+        check(hasText(entities, "recommended to"), "ER labels are drawn");
+    }
 }
 
 } // namespace
@@ -399,11 +1698,24 @@ int main(int argc, char** argv) {
     testBomAndSemicolonStatements();
     testCyclicLayout();
     testBackslashNLineBreak();
+    testMultilineQuotedLabels();
     testAttributeSyntaxRejected();
     testLayoutExposesRanks();
     testDetectKind();
     testExtBuilders();
     testExtFallbacks();
+    testStateOverlapRepro();
+    testStateMachines();
+    testCompositeStates();
+    testClassAndErLayouts();
+    testFrontMatterFixture();
+    testC4ReportedLabels();
+    testC4LabelLayouts();
+    testC4CrowdedLabels();
+    testC4LabelFixture();
+    testAsymmetricShape();
+    testLongLinks();
+    testAsymmetricFixture();
     testFiles(argc, argv);
 
     if (failures != 0) {

@@ -304,6 +304,18 @@ float folderItemContentY(const FolderBrowserMetrics& g, int index) {
     return y + (index - g.dirCount) * g.itemHeight;
 }
 
+float folderBrowserContentHeight(const App& app, const FolderBrowserMetrics& g) {
+    return g.namingOffset +
+           (app.folderItems.empty()
+                ? 0.0f
+                : folderItemContentY(g, (int)app.folderItems.size() - 1) + g.itemHeight);
+}
+
+float folderBrowserMaxScroll(const App& app) {
+    FolderBrowserMetrics g = folderBrowserMetrics(app);
+    return std::max(0.0f, folderBrowserContentHeight(app, g) - (g.listBottom - g.listStartY));
+}
+
 // Item index at a client point, sharing renderFolderBrowser's geometry.
 // Clicks must hit-test their own coordinates: the render-time hover index
 // lags one paint behind the mouse, so a fast move-and-click would act on
@@ -669,11 +681,7 @@ void renderFolderBrowser(App& app) {
         float listStartY = g.listStartY;
         float listHeight = g.listBottom - listStartY;
         float namingOffset = g.namingOffset;
-        float totalItemsHeight = namingOffset +
-            (app.folderItems.empty()
-                 ? 0.0f
-                 : folderItemContentY(g, (int)app.folderItems.size() - 1) +
-                       g.itemHeight);
+        float totalItemsHeight = folderBrowserContentHeight(app, g);
 
         // Clamp scroll
         float maxScroll = std::max(0.0f, totalItemsHeight - listHeight);
@@ -836,19 +844,7 @@ void renderFolderBrowser(App& app) {
         }
 
         // Scrollbar if needed
-        if (totalItemsHeight > listHeight) {
-            float sbHeight = listHeight / totalItemsHeight * listHeight;
-            sbHeight = std::max(sbHeight, dpi(app, 20.0f));
-            float sbY = listStartY + (maxScroll > 0 ? (app.folderBrowserScroll / maxScroll * (listHeight - sbHeight)) : 0);
-
-            D2D1_COLOR_F sbColor = app.theme.text;
-            sbColor.a = 0.25f * anim;
-            app.brush->SetColor(sbColor);
-            app.renderTarget->FillRoundedRectangle(
-                D2D1::RoundedRect(D2D1::RectF(g.cardRight - dpi(app, 6.0f), sbY,
-                                              g.cardRight - dpi(app, 3.0f), sbY + sbHeight), 1.5f, 1.5f),
-                app.brush);
-        }
+        renderPanelScrollbar(app, PanelList::Browser, anim);
 
         // Footer: counts on the left, the key hints on the right
         float footTop = g.listBottom;
@@ -906,13 +902,17 @@ float tocHeadingIndent(const App& app, int level) {
     return std::clamp(level - 1, 0, 5) * step;
 }
 
-float tocMaxScroll(const App& app) {
-    const auto rect = tocListRect(app);
+float tocListContentHeight(const App& app) {
     const auto needle = toLower(app.tocFilter);
     size_t count = 0;
     for (const auto& heading : app.headings)
         if (needle.empty() || toLower(heading.text).find(needle) != std::wstring::npos) ++count;
-    return std::max(0.0f, count * dpi(app, 26.0f) - std::max(0.0f, rect.bottom - rect.top));
+    return count * dpi(app, 26.0f);
+}
+
+float tocMaxScroll(const App& app) {
+    const auto rect = tocListRect(app);
+    return std::max(0.0f, tocListContentHeight(app) - std::max(0.0f, rect.bottom - rect.top));
 }
 
 // Click hit-test sharing the renderer's card geometry (#114 pattern:
@@ -1227,19 +1227,7 @@ void renderToc(App& app) {
             app.renderTarget->PopAxisAlignedClip();
 
             // Scrollbar if needed
-            if (totalItemsHeight > listHeight) {
-                float sbHeight = listHeight / totalItemsHeight * listHeight;
-                sbHeight = std::max(sbHeight, dpi(app, 20.0f));
-                float sbY = listStartY + (maxScroll > 0 ? (app.tocScroll / maxScroll * (listHeight - sbHeight)) : 0);
-
-                D2D1_COLOR_F sbColor = app.theme.text;
-                sbColor.a = 0.25f * anim;
-                app.brush->SetColor(sbColor);
-                app.renderTarget->FillRoundedRectangle(
-                    D2D1::RoundedRect(D2D1::RectF(cardRight - dpi(app, 6.0f), sbY,
-                                                  cardRight - dpi(app, 3.0f), sbY + sbHeight), 1.5f, 1.5f),
-                    app.brush);
-            }
+            renderPanelScrollbar(app, PanelList::Contents, anim);
         }
 
         // Footer: the hint plus the active Contents shortcut
@@ -1873,6 +1861,21 @@ void renderThemeChooser(App& app) {
     }
 }
 
+// Centred text in a rect, aligned on its own layout: the shared formats it
+// draws with are also the TOC's, the search panel's and the tab hover
+// card's, which expect leading alignment (#270)
+static void drawCenteredText(App& app, const wchar_t* text, IDWriteTextFormat* format,
+                             const D2D1_RECT_F& rect) {
+    IDWriteTextLayout* layout = nullptr;
+    if (!format || FAILED(app.dwriteFactory->CreateTextLayout(text, (UINT32)wcslen(text), format,
+            rect.right - rect.left, rect.bottom - rect.top, &layout))) {
+        return;
+    }
+    layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    app.renderTarget->DrawTextLayout(D2D1::Point2F(rect.left, rect.top), layout, app.brush);
+    layout->Release();
+}
+
 void renderHelpOverlay(App& app) {
     // Animate in
     if (app.helpAnimation < 1.0f) {
@@ -1915,13 +1918,11 @@ void renderHelpOverlay(App& app) {
     float titleBottomY = panelY + dpi(app, 55.0f);
     IDWriteTextFormat* titleFormat = app.themeTitleFormat;
     if (titleFormat) {
-        titleFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         D2D1_COLOR_F titleColor = app.theme.heading;
         titleColor.a = anim;
         app.brush->SetColor(titleColor);
-        const wchar_t* helpTitle = tr(app, "help.title");
-        app.renderTarget->DrawText(helpTitle, (UINT32)wcslen(helpTitle), titleFormat,
-            D2D1::RectF(panelX, panelY + dpi(app, 15.0f), panelX + panelWidth, titleBottomY), app.brush);
+        drawCenteredText(app, tr(app, "help.title"), titleFormat,
+            D2D1::RectF(panelX, panelY + dpi(app, 15.0f), panelX + panelWidth, titleBottomY));
     }
 
     // Version badge in the panel's top-right corner (from CMake's
@@ -2012,6 +2013,7 @@ void renderHelpOverlay(App& app) {
         {L"Ctrl+N",       tr(app, "help.general.new_note")},
         {L"Ctrl+Shift+N", tr(app, "help.general.new_window")},
         {L"Ctrl+P",       tr(app, "ctx.print")},
+        {L"Ctrl+G",       tr(app, "editor.goto_line")},
         {L"ESC",          tr(app, "help.general.close")},
         {kQuit.c_str(),   tr(app, "help.general.quit")},
     };
@@ -2094,13 +2096,11 @@ void renderHelpOverlay(App& app) {
     drawSection(tr(app, "help.section.general"), generalEntries, (int)_countof(generalEntries));
 
     // Footer hint
-    normalFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     D2D1_COLOR_F footerColor = app.theme.text;
     footerColor.a = 0.55f * anim;
     app.brush->SetColor(footerColor);
-    const wchar_t* helpFooter = tr(app, "help.footer");
-    app.renderTarget->DrawText(helpFooter, (UINT32)wcslen(helpFooter), normalFmt,
-        D2D1::RectF(panelX, y, panelX + panelWidth, y + lineH), app.brush);
+    drawCenteredText(app, tr(app, "help.footer"), normalFmt,
+        D2D1::RectF(panelX, y, panelX + panelWidth, y + lineH));
 
     app.renderTarget->PopAxisAlignedClip();
 
@@ -2560,7 +2560,10 @@ void settingsChip(App& app, float& x, float y, const wchar_t* label, bool active
 
 D2D1_RECT_F settingsPanelRect(const App& app) {
     float w = std::min(dpi(app, app.settingsSection == 3 ? 980.0f : 760.0f), app.width - dpi(app, app.settingsSection == 3 ? 32.0f : 80.0f));
-    float h = std::min(dpi(app, app.settingsSection == 3 ? 650.0f : 540.0f), app.height - dpi(app, 64.0f));
+    // Leave room for the last row and localized footer in every section.
+    // Appearance holds a sixth row since notifications joined (#273)
+    const float tall = app.settingsSection == 3 || app.settingsSection == 1 ? 650.0f : 590.0f;
+    float h = std::min(dpi(app, tall), app.height - dpi(app, 64.0f));
     float x = (app.width - w) / 2;
     float y = (app.height - h) / 2 + (1 - app.settingsAnimation) * dpi(app, 30.0f);
     return D2D1::RectF(x, y, x + w, y + h);
@@ -2725,17 +2728,18 @@ void renderSettingsOverlay(App& app) {
                          float reserveRight = 0.0f) {
         D2D1_COLOR_F tc = app.theme.text; tc.a = 0.95f * anim;
         app.brush->SetColor(tc);
+        // Clipped: a long tool path stops short of the chips on the right
         app.renderTarget->DrawText(label, (UINT32)wcslen(label), fmt,
             D2D1::RectF(cx + cardPad, cy + dpi(app, 10.0f),
                         cx + cw - cardPad - reserveRight, cy + dpi(app, 28.0f)),
-            app.brush);
+            app.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
         if (hint) {
             tc.a = 0.5f * anim;
             app.brush->SetColor(tc);
             app.renderTarget->DrawText(hint, (UINT32)wcslen(hint), fmt,
                 D2D1::RectF(cx + cardPad, cy + dpi(app, 28.0f),
                             cx + cw - cardPad - reserveRight, cy + dpi(app, 46.0f)),
-                app.brush);
+                app.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
     };
     // Right-aligned chip rows: total advance width of settingsChip calls
@@ -2878,14 +2882,18 @@ void renderSettingsOverlay(App& app) {
                        cy + (rowCardH - dpi(app, 20.0f)) * 0.5f,
                        app.openInTabs, SET_TOGGLE_OPENTABS, anim);
         cy += rowCardH + cardGap;
+        card(rowCardH);
+        cardLabel(tr(app, "settings.keep_deleted_tabs"), tr(app, "settings.keep_deleted_tabs.hint"), dpi(app, 60.0f));
+        settingsToggle(app, cx + cw - cardPad - dpi(app, 40.0f),
+                       cy + (rowCardH - dpi(app, 20.0f)) * 0.5f,
+                       app.keepDeletedTabs, SET_TOGGLE_KEEPDELETED, anim);
+        cy += rowCardH + cardGap;
         // One card for the three hand-editable ini files (was three rows)
         card(rowCardH);
-        float filesW = chipsWidth({L"settings.ini", L"themes.ini", L"languages.ini"});
-        cardLabel(tr(app, "settings.config_files"), tr(app, "settings.config_files.hint"),
-                  filesW + dpi(app, 10.0f));
+        cardLabel(tr(app, "settings.config_files"), nullptr);
         {
-            float bx = cx + cw - cardPad - filesW;
-            float chipY = cy + (rowCardH - dpi(app, 24.0f)) * 0.5f;
+            float bx = cx + cardPad;
+            float chipY = cy + dpi(app, 28.0f);
             settingsChip(app, bx, chipY, L"settings.ini", false, SET_OPEN_INI, anim, fmt);
             settingsChip(app, bx, chipY, L"themes.ini", false, SET_OPEN_THEMES_INI, anim, fmt);
             settingsChip(app, bx, chipY, L"languages.ini", false, SET_OPEN_LANGS_INI, anim, fmt);
@@ -2972,6 +2980,14 @@ void renderSettingsOverlay(App& app) {
             // The create action is the accent-filled primary button
             settingsChip(app, bx2, chipY, tr(app, "settings.new"), true, SET_NEW_THEME, anim, fmt);
         }
+        cy += rowCardH + cardGap;
+        // Bottom-right messages (#273): warnings and questions always show
+        card(rowCardH);
+        cardLabel(tr(app, "settings.notifications"), tr(app, "settings.notifications.hint"),
+                  dpi(app, 60.0f));
+        settingsToggle(app, cx + cw - cardPad - dpi(app, 40.0f),
+                       cy + (rowCardH - dpi(app, 20.0f)) * 0.5f,
+                       app.showNotifications, SET_TOGGLE_NOTIFICATIONS, anim);
     } else {  // Editor
         card(rowCardH);
         cardLabel(tr(app, "settings.word_wrap"), tr(app, "settings.word_wrap.hint"), dpi(app, 60.0f));
@@ -3997,6 +4013,19 @@ void renderThemeEditor(App& app) {
         float fontRowHeight = dpi(app, 26.0f);
         float maxScroll = std::max(0.0f,
             (float)rows * fontRowHeight - (list.bottom - list.top));
+        if (app.themeEditorFontScroll < 0.0f) {
+            // Opening the editor, its base arrows and Text / Headings / Code
+            // centre the chosen face, here where the list's height is known
+            // (#284)
+            int row = 0;
+            for (size_t i = 0; !chosen.empty() && i < app.systemFontFamilies.size(); i++) {
+                if (_wcsicmp(app.systemFontFamilies[i].c_str(), chosen.c_str()) == 0) {
+                    row = (int)i + lead;
+                    break;
+                }
+            }
+            app.themeEditorFontScroll = row * fontRowHeight - (list.bottom - list.top - fontRowHeight) / 2;
+        }
         app.themeEditorFontScroll = std::max(0.0f, std::min(app.themeEditorFontScroll, maxScroll));
         int first = (int)(app.themeEditorFontScroll / fontRowHeight);
         int visible = (int)((list.bottom - list.top) / fontRowHeight) + 2;

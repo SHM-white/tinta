@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(tinta VERSION 3.8.0 LANGUAGES C CXX)
+project(tinta VERSION 3.9.3 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,6 +57,7 @@ set(SOURCES
     src/sidepanels.cpp
     src/context_menu.cpp
     src/input.cpp
+    src/touch.cpp
     src/editor.cpp
     src/mermaid.cpp
     src/mermaid_ext.cpp
@@ -109,6 +110,7 @@ set(HEADERS
     include/file_utils.h
     include/overlays.h
     include/input.h
+    include/touch.h
     include/editor.h
     include/mermaid.h
     include/mermaid_ext.h
@@ -159,10 +161,6 @@ target_compile_definitions(tinta PRIVATE UNICODE _UNICODE
     TINTA_VERSION_PATCH=${PROJECT_VERSION_PATCH})
 
 if(BUILD_TESTING)
-    add_executable(touch_pan_tests tests/touch_pan_tests.cpp)
-    target_include_directories(touch_pan_tests PRIVATE include)
-    add_test(NAME touch_pan_bounds COMMAND touch_pan_tests)
-
     add_executable(keymap_tests tests/keymap_tests.cpp src/keymap.cpp)
     target_include_directories(keymap_tests PRIVATE include)
     add_test(NAME keymap COMMAND keymap_tests)
@@ -171,10 +169,11 @@ if(BUILD_TESTING)
     # window, including layout-dependent character sequences (#195).
     set(INPUT_TEST_SOURCES ${SOURCES})
     list(REMOVE_ITEM INPUT_TEST_SOURCES src/main_d2d.cpp)
-    add_executable(input_tests tests/input_tests.cpp tests/table_input_tests.cpp tests/docked_preview_tests.cpp tests/table_layout_tests.cpp tests/window_drag_tests.cpp tests/tab_drop_tests.cpp tests/tab_hover_card_tests.cpp tests/search_panel_tests.cpp tests/superscript_tests.cpp tests/sidepanel_tests.cpp tests/image_tests.cpp tests/search_input_tests.cpp tests/wrapped_cursor_tests.cpp tests/file_fragment_tests.cpp tests/editor_context_tests.cpp tests/editor_features_tests.cpp tests/ui_font_tests.cpp tests/print_export_tests.cpp ${INPUT_TEST_SOURCES})
+    add_executable(input_tests tests/input_tests.cpp tests/deleted_tab_tests.cpp tests/table_input_tests.cpp tests/docked_preview_tests.cpp tests/table_layout_tests.cpp tests/window_drag_tests.cpp tests/tab_drop_tests.cpp tests/tab_hover_card_tests.cpp tests/search_panel_tests.cpp tests/superscript_tests.cpp tests/sidepanel_tests.cpp tests/image_tests.cpp tests/search_input_tests.cpp tests/wrapped_cursor_tests.cpp tests/file_fragment_tests.cpp tests/editor_context_tests.cpp tests/editor_features_tests.cpp tests/ui_font_tests.cpp tests/print_export_tests.cpp tests/scroll_sync_tests.cpp tests/notification_setting_tests.cpp tests/goto_line_tests.cpp tests/reading_position_tests.cpp tests/split_scrollbar_tests.cpp tests/touch_tests.cpp ${INPUT_TEST_SOURCES})
     target_include_directories(input_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(input_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
     target_compile_definitions(input_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
+        TINTA_DELETED_TAB_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/deleted-tab.md"
         TINTA_SHORTCUT_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/shortcuts-layouts.md"
         TINTA_TAB_DROP_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/tab-drop-position.md"
         TINTA_TAB_HOVER_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/tab-hover-card"
@@ -186,11 +185,13 @@ if(BUILD_TESTING)
         TINTA_FIND_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/find-table-focus.md"
         TINTA_WRAP_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/wrapped-cursor-selection.md"
         TINTA_SEARCH_WRAP_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/search-word-wrap-260.md"
+        TINTA_ZOOM_WRAP_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/editor-zoom-wrap-266.md"
         TINTA_FRAGMENT_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/file-fragments/index.md"
         TINTA_CONTEXT_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/editor-context-selection.md"
         TINTA_MULTICURSOR_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/editor-multicursor-251.md"
         TINTA_PRINT_EXPORT_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/print-word-export-256.md"
-        TINTA_PRINT_EXPORT_THEMES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/print-word-export-themes.ini")
+        TINTA_PRINT_EXPORT_THEMES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/print-word-export-themes.ini"
+        TINTA_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME editor_features COMMAND ${CMAKE_COMMAND}
         -DTEST_BINARY=$<TARGET_FILE:input_tests>
         -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/editor-feature-test-$<CONFIG>
@@ -215,6 +216,11 @@ if(BUILD_TESTING)
         -DTEST_BINARY=$<TARGET_FILE:input_tests>
         -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/wrapped-cursor-test-$<CONFIG>
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_wrapped_cursor_tests.cmake)
+    add_test(NAME edit_preview_scroll_sync COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:input_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/scroll-sync-test-$<CONFIG>
+        -DTEST_DOC=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/scroll-sync-267/docs/scroll-sync.md
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_scroll_sync_tests.cmake)
     add_test(NAME search_input_focus COMMAND ${CMAKE_COMMAND}
         -DTEST_BINARY=$<TARGET_FILE:input_tests>
         -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/search-input-test-$<CONFIG>
@@ -252,6 +258,34 @@ if(BUILD_TESTING)
         -DTEST_BINARY=$<TARGET_FILE:input_tests>
         -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/tab-drop-test-$<CONFIG>
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tab_drop_tests.cmake)
+    add_test(NAME deleted_tab COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:input_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/deleted-tab-memory-test-$<CONFIG>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_deleted_tab_tests.cmake)
+    add_test(NAME notification_setting COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:input_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/notification-setting-test-$<CONFIG>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_notification_setting_tests.cmake)
+    add_test(NAME goto_line COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:input_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/goto-line-test-$<CONFIG>
+        -DTEST_DOC=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/goto-line-276.md
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_goto_line_tests.cmake)
+    add_test(NAME reading_position COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:input_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/reading-position-test-$<CONFIG>
+        -DTEST_DOC=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/reading-position-279.md
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_reading_position_tests.cmake)
+    add_test(NAME split_scrollbars COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:input_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/split-scrollbar-test-$<CONFIG>
+        -DTEST_DOC=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/split-scrollbars-280.md
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_split_scrollbar_tests.cmake)
+    add_test(NAME touch_gestures COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:input_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/touch-test-$<CONFIG>
+        -DTEST_DOC=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/touch-gestures-286.md
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_touch_tests.cmake)
     add_test(NAME tab_hover_card COMMAND ${CMAKE_COMMAND}
         -DTEST_BINARY=$<TARGET_FILE:input_tests>
         -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/tab-hover-card-test-$<CONFIG>
@@ -271,7 +305,13 @@ if(BUILD_TESTING)
     target_include_directories(code_block_layout_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(code_block_layout_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
     target_compile_definitions(code_block_layout_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
-        TINTA_CODE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/code-block-spacing.md")
+        TINTA_CODE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/code-block-spacing.md"
+        TINTA_COPY_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/code-block-copy-269.md"
+        TINTA_MERMAID_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-front-matter-261.md"
+        TINTA_MERMAID_LABELS_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-multiline-labels-281.md"
+        TINTA_MERMAID_C4_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-c4-labels.md"
+        TINTA_MERMAID_ASYMMETRIC_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-asymmetric-shape.md"
+        TINTA_MERMAID_STATES_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-state-diagrams.md")
     add_test(NAME code_block_layout COMMAND code_block_layout_tests)
 
     add_executable(syntax_tests tests/syntax_tests.cpp ${INPUT_TEST_SOURCES})
@@ -298,12 +338,26 @@ if(BUILD_TESTING)
         TINTA_FOOTNOTE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/footnotes.md")
     add_test(NAME footnotes COMMAND footnote_tests)
 
+    add_executable(script_span_tests tests/script_span_tests.cpp ${INPUT_TEST_SOURCES})
+    target_include_directories(script_span_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(script_span_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
+    target_compile_definitions(script_span_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
+        TINTA_TILDE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/tilde-ranges-277.md")
+    add_test(NAME tilde_ranges COMMAND script_span_tests)
+
     add_executable(html_span_tests tests/html_span_tests.cpp ${INPUT_TEST_SOURCES})
     target_include_directories(html_span_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(html_span_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
     target_compile_definitions(html_span_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
         TINTA_HTML_SPAN_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/html-inline-tags-263.md")
     add_test(NAME html_spans COMMAND html_span_tests)
+
+    add_executable(rich_copy_tests tests/rich_copy_tests.cpp ${INPUT_TEST_SOURCES})
+    target_include_directories(rich_copy_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(rich_copy_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
+    target_compile_definitions(rich_copy_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
+        TINTA_RICH_COPY_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/rich-copy-bold.md")
+    add_test(NAME rich_copy COMMAND rich_copy_tests)
 
     add_executable(blockquote_layout_tests tests/blockquote_layout_tests.cpp ${INPUT_TEST_SOURCES})
     target_include_directories(blockquote_layout_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
@@ -316,7 +370,9 @@ if(BUILD_TESTING)
     target_include_directories(theme_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(theme_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
     target_compile_definitions(theme_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
-        TINTA_THEME_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/inline-code-color.md")
+        TINTA_THEME_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/inline-code-color.md"
+        TINTA_THEME_FONTS_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/theme-editor-fonts-265.md"
+        TINTA_INLINE_BG_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/inline-code-background-278.md")
     add_test(NAME inline_code_theme COMMAND ${CMAKE_COMMAND}
         -DTEST_BINARY=$<TARGET_FILE:theme_tests>
         -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/theme-test-$<CONFIG>
@@ -362,6 +418,10 @@ if(BUILD_TESTING)
     target_include_directories(mermaid_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
+    target_compile_definitions(mermaid_tests PRIVATE
+        TINTA_MERMAID_FRONT_MATTER_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-front-matter-261.md"
+        TINTA_MERMAID_C4_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-c4-labels.md"
+        TINTA_MERMAID_ASYMMETRIC_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-asymmetric-shape.md")
     add_test(NAME mermaid_parser COMMAND mermaid_tests)
 
     # PlantUML CLI test double (used by the plantuml suites; no Java needed).
@@ -393,6 +453,19 @@ if(BUILD_TESTING)
         -DTEST_ARGS=--expect-failure
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_plantuml_tests.cmake)
     set_tests_properties(plantuml_parser_selfcheck PROPERTIES WILL_FAIL TRUE)
+
+    # PlantUML inside the app: layout, print preview, Word export, settings
+    add_executable(plantuml_app_tests tests/plantuml_app_tests.cpp ${INPUT_TEST_SOURCES})
+    target_include_directories(plantuml_app_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(plantuml_app_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
+    target_compile_definitions(plantuml_app_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
+        TINTA_FAKE_PLANTUML="$<TARGET_FILE:fake_plantuml>"
+        TINTA_TRANSPARENT_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/plantuml-transparent")
+    add_dependencies(plantuml_app_tests fake_plantuml)
+    add_test(NAME plantuml_in_app COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:plantuml_app_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/plantuml-app-test-$<CONFIG>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_portable_test.cmake)
 
     add_executable(document_tests
         tests/document_tests.cpp
@@ -447,8 +520,19 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
     target_link_libraries(i18n_tests PRIVATE shell32)
-    target_compile_definitions(i18n_tests PRIVATE UNICODE _UNICODE)
+    target_compile_definitions(i18n_tests PRIVATE UNICODE _UNICODE
+        TINTA_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME i18n COMMAND i18n_tests)
+
+    add_executable(russian_ui_tests tests/russian_ui_tests.cpp ${INPUT_TEST_SOURCES})
+    target_include_directories(russian_ui_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(russian_ui_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
+    target_compile_definitions(russian_ui_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
+        TINTA_RUSSIAN_UI_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/russian-interface.md")
+    add_test(NAME russian_interface COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:russian_ui_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/russian-ui-test-$<CONFIG>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_russian_ui_tests.cmake)
 
     add_executable(config_path_tests
         tests/config_path_tests.cpp

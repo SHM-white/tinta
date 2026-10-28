@@ -36,6 +36,10 @@
 
 using namespace qmd;
 
+// Shared with the clipboard copy below the anonymous namespace
+bool plantumlOpaquePixels(App& app, const std::wstring& pngPath, UINT scale,
+                          std::vector<BYTE>& pixels, UINT& outW, UINT& outH);
+
 namespace {
 
 // --------------------------------------------------------------------------
@@ -610,6 +614,8 @@ struct DocxCtx {
     std::string headingColors[6], highlightBgHex, highlightTextHex;
     std::string accentHex, linkHex, quoteBorderHex;
     std::string inlineCodeHex;  // explicit override; legacy paper colors otherwise
+    // Shading behind inline code; empty when the theme asks for none (#278)
+    std::string inlineCodeBgHex;
     std::string bodyFont, monoFont;
 
     // PlantUML export state: the cumulative wall-clock budget for sync
@@ -671,8 +677,8 @@ std::string runPropsXml(const DocxCtx& ctx, const RunProps& props) {
     if (props.underline) xml += "<w:u w:val=\"single\"/>";
     if (props.highlight && !ctx.highlightBgHex.empty())
         xml += "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"" + ctx.highlightBgHex + "\"/>";
-    else if (props.code)
-        xml += "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"" + ctx.codeBgHex + "\"/>";
+    else if (props.code && !ctx.inlineCodeBgHex.empty())
+        xml += "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"" + ctx.inlineCodeBgHex + "\"/>";
     if (props.superScript) xml += "<w:vertAlign w:val=\"superscript\"/>";
     else if (props.subScript) xml += "<w:vertAlign w:val=\"subscript\"/>";
     return xml.empty() ? "" : "<w:rPr>" + xml + "</w:rPr>";
@@ -1114,6 +1120,20 @@ bool emitPlantumlImage(DocxCtx& ctx, const std::string& source,
         !imageDimensions(png, width, height)) {
         return false;
     }
+    // On the theme's own background, as the mermaid diagrams are: a dark
+    // theme's light labels must not land on Word's white page
+    std::vector<BYTE> pixels;
+    UINT opaqueW = 0, opaqueH = 0;
+    if (plantumlOpaquePixels(app, pngPath, 1, pixels, opaqueW, opaqueH)) {
+        IWICBitmap* bitmap = nullptr;
+        if (SUCCEEDED(app.wicFactory->CreateBitmapFromMemory(
+                opaqueW, opaqueH, GUID_WICPixelFormat32bppPBGRA, opaqueW * 4,
+                static_cast<UINT>(pixels.size()), pixels.data(), &bitmap))) {
+            std::string opaque = encodeWicPng(app, bitmap, opaqueW, opaqueH);
+            if (!opaque.empty()) png = std::move(opaque);
+            bitmap->Release();
+        }
+    }
     const int rel = addImageRel(ctx, "png", png);
     long long cx, cy;
     // PlantUML renders at 1x, so the PNG's pixel size is its natural size
@@ -1552,6 +1572,13 @@ bool exportDocxFile(App& app, const std::wstring& path) {
     ctx.mutedHex = dark ? "555555" : hexOver(muted, theme.background);
     ctx.codeBgHex = dark ? "F2F0EE" : hex6(theme.codeBackground);
     if (theme.inlineCode) ctx.inlineCodeHex = hex6(*theme.inlineCode);
+    // A dark theme's own colours would sit on white paper, so as for code
+    // blocks an explicit inline colour gives way to the light paper shade
+    ctx.inlineCodeBgHex = ctx.codeBgHex;
+    if (theme.inlineCodeBackground) {
+        ctx.inlineCodeBgHex = theme.inlineCodeBackground->a <= 0.0f ? std::string()
+                              : dark ? "F2F0EE" : hex6(*theme.inlineCodeBackground);
+    }
     D2D1_COLOR_F border = theme.text;
     border.a = 0.25f;
     ctx.borderHex = dark ? "C8C8C8" : hexOver(border, theme.background);
@@ -1712,7 +1739,7 @@ bool exportDocxFile(App& app, const std::wstring& path) {
 // Rasterizes the diagram exactly like the DOCX path, then hands the pixels
 // to the clipboard as CF_DIB (universal) plus a "PNG" stream (kept by apps
 // that prefer lossless with metadata)
-bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8) {
+bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8, bool* held) {
     mermaidext::Built built = buildDiagramPrims(app, sourceUtf8, kRasterScale);
     if (!built.ok || built.prims.empty()) return false;
     RasterTarget rt;
@@ -1770,7 +1797,7 @@ bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8) {
         }
     }
 
-    if (!OpenClipboard(hwnd)) {
+    if (!openClipboard(hwnd, held)) {
         GlobalFree(dib);
         if (pngGlobal) GlobalFree(pngGlobal);
         return false;
@@ -1788,20 +1815,20 @@ bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8) {
     return ok;
 }
 
-// Puts a rendered PlantUML PNG on the clipboard at 2x, mirroring the
-// mermaid Image button (CF_DIB plus a "PNG" stream). PlantUML renders on
-// a transparent background, so the scaled pixels are composited over the
-// active theme background before the DIB is built (CF_DIB consumers
-// ignore the alpha byte). Failure is silent: the caller shows no toast.
-bool copyPlantumlImageToClipboard(App& app, const std::wstring& pngPath) {
-    if (!app.wicFactory || pngPath.empty()) return false;
+// A rendered PlantUML PNG decoded at `scale` and composited over the
+// active theme background, made opaque: PlantUML draws on a transparent
+// page, which would leave a dark theme's light labels on white paper in
+// Word, and CF_DIB consumers ignore alpha. Premultiplied BGRA rows.
+bool plantumlOpaquePixels(App& app, const std::wstring& pngPath, UINT scale,
+                          std::vector<BYTE>& pixels, UINT& outW, UINT& outH) {
+    pixels.clear();
+    outW = outH = 0;
+    if (!app.wicFactory || pngPath.empty() || scale == 0) return false;
 
     IWICBitmapDecoder* decoder = nullptr;
     IWICBitmapFrameDecode* frame = nullptr;
     IWICFormatConverter* converter = nullptr;
     IWICBitmapScaler* scaler = nullptr;
-    UINT outW = 0, outH = 0;
-    std::vector<BYTE> pixels;
 
     if (SUCCEEDED(app.wicFactory->CreateDecoderFromFilename(
             pngPath.c_str(), nullptr, GENERIC_READ,
@@ -1816,10 +1843,10 @@ bool copyPlantumlImageToClipboard(App& app, const std::wstring& pngPath) {
                 WICBitmapDitherTypeNone, nullptr, 0.0,
                 WICBitmapPaletteTypeCustom)) &&
             SUCCEEDED(app.wicFactory->CreateBitmapScaler(&scaler)) &&
-            SUCCEEDED(scaler->Initialize(converter, w * 2, h * 2,
+            SUCCEEDED(scaler->Initialize(converter, w * scale, h * scale,
                                          WICBitmapInterpolationModeFant))) {
-            outW = w * 2;
-            outH = h * 2;
+            outW = w * scale;
+            outH = h * scale;
             const UINT stride = outW * 4;
             pixels.resize((size_t)stride * outH);
             if (SUCCEEDED(scaler->CopyPixels(nullptr, stride,
@@ -1849,7 +1876,17 @@ bool copyPlantumlImageToClipboard(App& app, const std::wstring& pngPath) {
     if (converter) converter->Release();
     if (frame) frame->Release();
     if (decoder) decoder->Release();
-    if (pixels.empty()) return false;
+    return !pixels.empty();
+}
+
+// Puts a rendered PlantUML PNG on the clipboard at 2x, mirroring the
+// mermaid Image button (CF_DIB plus a "PNG" stream), composited over the
+// theme background (plantumlOpaquePixels). Failure is silent: the caller
+// shows no toast.
+bool copyPlantumlImageToClipboard(App& app, const std::wstring& pngPath, bool* held) {
+    UINT outW = 0, outH = 0;
+    std::vector<BYTE> pixels;
+    if (!plantumlOpaquePixels(app, pngPath, 2, pixels, outW, outH)) return false;
 
     // CF_DIB: header plus bottom-up 32bpp rows
     const UINT stride = outW * 4;
@@ -1898,7 +1935,7 @@ bool copyPlantumlImageToClipboard(App& app, const std::wstring& pngPath) {
         }
     }
 
-    if (!OpenClipboard(app.hwnd)) {
+    if (!openClipboard(app.hwnd, held)) {
         GlobalFree(dib);
         if (pngGlobal) GlobalFree(pngGlobal);
         return false;
@@ -1922,7 +1959,7 @@ bool clipboardImageToPngFile(App& app, HWND hwnd, const std::wstring& path) {
     if (!IsClipboardFormatAvailable(CF_BITMAP) || !app.wicFactory) {
         return false;
     }
-    if (!OpenClipboard(hwnd)) return false;
+    if (!openClipboard(hwnd)) return false;
     bool ok = false;
     if (HBITMAP hbm = (HBITMAP)GetClipboardData(CF_BITMAP)) {
         IWICBitmap* bitmap = nullptr;

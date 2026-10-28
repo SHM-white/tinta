@@ -3,13 +3,20 @@
 #include "editor.h"
 #include "i18n.h"
 #include "input.h"
+#include "overlays.h"
 #include "settings.h"
 #include "utils.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <d2d1_1.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <vector>
+#include <wrl/client.h>
 
 // Tab hover card (#246): a pointer resting on a tab shows the tab's whole
 // name and folder below the strip, after a dwell, and a click, key, wheel
@@ -50,6 +57,191 @@ bool hoverUntilCard(App& app, int tab) {
     paint(app);
     return cardShown(app);
 }
+}
+
+// The tab strip as drawn: for one frame the window target's device context
+// draws into a bitmap, which is copied to the CPU
+bool drawStrip(App& app, std::vector<uint32_t>& pixels, UINT& width, UINT& height) {
+    Microsoft::WRL::ComPtr<ID2D1DeviceContext> dc;
+    if (FAILED(app.renderTarget->QueryInterface(IID_PPV_ARGS(&dc)))) return false;
+    width = (UINT)app.width;
+    height = (UINT)std::ceil(chromeTopHeight(app));
+    const auto format = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
+    Microsoft::WRL::ComPtr<ID2D1Bitmap1> target, readable;
+    if (FAILED(dc->CreateBitmap(D2D1::SizeU(width, height), nullptr, 0,
+            D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET, format), &target)) ||
+        FAILED(dc->CreateBitmap(D2D1::SizeU(width, height), nullptr, 0,
+            D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                                    format), &readable))) {
+        return false;
+    }
+    Microsoft::WRL::ComPtr<ID2D1Image> previous;
+    dc->GetTarget(&previous);
+    dc->SetTarget(target.Get());
+    dc->BeginDraw();
+    dc->Clear(app.theme.background);
+    renderTabStrip(app);
+    const bool drawn = SUCCEEDED(dc->EndDraw());
+    dc->SetTarget(previous.Get());
+    D2D1_MAPPED_RECT mapped{};
+    if (!drawn || FAILED(readable->CopyFromBitmap(nullptr, target.Get(), nullptr)) ||
+        FAILED(readable->Map(D2D1_MAP_OPTIONS_READ, &mapped))) {
+        return false;
+    }
+    pixels.resize((size_t)width * height);
+    for (UINT y = 0; y < height; y++)
+        memcpy(&pixels[(size_t)y * width], mapped.bits + (size_t)y * mapped.pitch, width * 4);
+    readable->Unmap();
+    return true;
+}
+
+// #271: the active tab's halo shows on both sides of the first and the last
+// tab, as on a tab in the middle. The strip's clip ended exactly at the row's
+// ends and cut it away on their outer side.
+void endTabsKeepTheirHalo(App& app) {
+    const int savedActive = app.activeTab, savedHovered = app.hoveredTab;
+    app.hoveredTab = -1;
+    // The strip with a middle tab active: no halo near either end
+    std::vector<uint32_t> plain;
+    UINT plainWidth = 0, plainHeight = 0;
+    app.activeTab = 1;
+    check(drawStrip(app, plain, plainWidth, plainHeight), "the tab strip draws into a bitmap");
+    for (int end : {0, (int)app.tabs.size() - 1}) {
+        app.activeTab = end;
+        std::vector<uint32_t> pixels;
+        UINT width = 0, height = 0;
+        check(drawStrip(app, pixels, width, height), "the tab strip draws into a bitmap");
+        const App::TabHit* hit = hitFor(app, end);
+        check(hit != nullptr, "the end tab is in view");
+        if (!hit || pixels.empty() || plain.size() != pixels.size()) continue;
+        // Green channel (the shadow is grey), averaged over the pixels whose
+        // centres lie 2-5 DIPs outside the tab's left or right edge
+        const int row = std::clamp((int)(hit->rect.bottom - dpi(app, 4.0f)), 0, (int)height - 1);
+        auto side = [&](const std::vector<uint32_t>& image, bool left) {
+            const float edge = left ? hit->rect.left : hit->rect.right;
+            int sum = 0, count = 0;
+            for (int x = (int)edge - (int)dpi(app, 7.0f); x <= (int)edge + (int)dpi(app, 7.0f); x++) {
+                const float distance = left ? edge - (x + 0.5f) : (x + 0.5f) - edge;
+                if (x < 0 || x >= (int)width || distance < dpi(app, 2.0f) || distance > dpi(app, 5.0f))
+                    continue;
+                sum += (int)((image[(size_t)row * width + x] >> 8) & 0xFF);
+                count++;
+            }
+            return count ? (float)sum / count : -1.0f;
+        };
+        const float outer = side(pixels, end == 0), inner = side(pixels, end != 0);
+        const float base = side(plain, end == 0);
+        if (std::abs(outer - inner) > 2.0f || outer > base - 1.0f)
+            std::cerr << "  tab " << end << ": outer side " << outer << ", inner side " << inner
+                      << ", without the halo " << base << '\n';
+        check(outer <= base - 1.0f, "the active end tab's halo shows on its outer side");
+        check(std::abs(outer - inner) <= 2.0f,
+              "the halo is as dark on the outer side as on the inner side");
+    }
+    app.activeTab = savedActive;
+    app.hoveredTab = savedHovered;
+}
+
+// #272: the wheel over the tab strip steps through the tabs and wraps
+void wheel(App& app, short delta, bool ctrl = false) {
+    BYTE original[256], pressed[256];
+    GetKeyboardState(original);
+    memcpy(pressed, original, sizeof pressed);
+    pressed[VK_CONTROL] = ctrl ? 0x80 : 0;
+    SetKeyboardState(pressed);
+    handleMouseWheel(app, app.hwnd, MAKEWPARAM(0, delta), 0);
+    SetKeyboardState(original);
+}
+
+void wheelSwitchesTabs(App& app) {
+    const int count = (int)app.tabs.size();
+    tabActivate(app, app.hwnd, 0);
+    paint(app);
+    const App::TabHit* hit = hitFor(app, 1);
+    check(hit != nullptr, "a tab to rest the pointer on");
+    if (!hit) return;
+    // Over a tab, then over the strip's empty stretch beside the + button
+    for (float x : {(hit->rect.left + hit->rect.right) * 0.5f, captionIslandLeft(app) - dpi(app, 12.0f)}) {
+        app.mouseX = (int)x;
+        app.mouseY = (int)(chromeTopHeight(app) * 0.5f);
+        app.tabWheelLast = {};
+        tabActivate(app, app.hwnd, 0);
+        bool order = true;
+        for (int step = 1; step <= count; step++) {  // down: right, last wraps to first
+            wheel(app, -WHEEL_DELTA);
+            order = order && app.activeTab == step % count;
+        }
+        check(order, "each notch down activates the next tab, and the last wraps to the first");
+        wheel(app, WHEEL_DELTA);
+        check(app.activeTab == count - 1, "a notch up from the first tab wraps to the last");
+        wheel(app, WHEEL_DELTA);
+        check(app.activeTab == count - 2, "a notch up activates the previous tab");
+    }
+    // A touchpad's quarter notches add up to one tab
+    tabActivate(app, app.hwnd, 0);
+    app.tabWheelLast = {};
+    for (int i = 0; i < 3; i++) wheel(app, -WHEEL_DELTA / 4);
+    check(app.activeTab == 0, "three quarter notches switch nothing yet");
+    wheel(app, -WHEEL_DELTA / 4);
+    check(app.activeTab == 1, "the fourth quarter notch moves one tab");
+    // A pause starts the count afresh, so stray fractions never add up
+    wheel(app, -WHEEL_DELTA / 2);
+    Sleep(450);
+    wheel(app, -WHEEL_DELTA / 2);
+    check(app.activeTab == 1, "half notches on either side of a pause switch nothing");
+    // Ctrl+wheel keeps zooming
+    const float zoom = app.zoomFactor;
+    wheel(app, WHEEL_DELTA, true);
+    check(app.activeTab == 1 && app.zoomFactor != zoom, "Ctrl+wheel over the strip zooms instead");
+    app.zoomFactor = zoom;
+    updateTextFormats(app);
+    // Below the strip the wheel scrolls the document as before
+    app.mouseY = (int)(chromeTopHeight(app) + dpi(app, 200.0f));
+    wheel(app, -WHEEL_DELTA);
+    check(app.activeTab == 1, "the wheel over the document leaves the tabs alone");
+    // A turn that closes the tab menu does only that
+    app.mouseY = (int)(chromeTopHeight(app) * 0.5f);
+    openTabMenu(app, 1, (float)app.mouseX, (float)app.mouseY);
+    wheel(app, -WHEEL_DELTA);
+    check(!app.showTabMenu && app.activeTab == 1, "a turn that closes the tab menu switches no tab");
+}
+
+// Left edge of a line laid out in a format, as the TOC and this card lay out
+// their rows
+float textLeft(App& app, IDWriteTextFormat* format, const wchar_t* text) {
+    IDWriteTextLayout* layout = nullptr;
+    if (FAILED(app.dwriteFactory->CreateTextLayout(text, (UINT32)wcslen(text), format,
+                                                  400.0f, 100.0f, &layout))) {
+        return -1.0f;
+    }
+    DWRITE_HIT_TEST_METRICS metrics{};
+    float x = 0.0f, y = 0.0f;
+    layout->HitTestTextPosition(0, FALSE, &x, &y, &metrics);
+    layout->Release();
+    return x;
+}
+
+// #270: Help centres its title and footer. It did so by centring the shared
+// formats, which the TOC, the search panel and this card also draw with, and
+// never set them back: after Help, TOC rows and the card's folder path were
+// centred. Help now leaves the shared formats as it found them.
+void helpLeavesSharedFormats(App& app) {
+    IDWriteTextFormat* shared[] = {app.tocFormat, app.tocFormatBold, app.themeTitleFormat,
+                                   app.folderBrowserFormat};
+    DWRITE_TEXT_ALIGNMENT before[4];
+    for (int i = 0; i < 4; i++) before[i] = shared[i]->GetTextAlignment();
+    check(textLeft(app, app.tocFormat, L"Heading") < 1.0f, "TOC rows start at the left before Help");
+    app.showHelp = true;
+    app.helpAnimation = 1.0f;
+    app.renderTarget->BeginDraw();
+    renderHelpOverlay(app);
+    check(SUCCEEDED(app.renderTarget->EndDraw()), "Help renders");
+    app.showHelp = false;
+    bool same = true;
+    for (int i = 0; i < 4; i++) same = same && shared[i]->GetTextAlignment() == before[i];
+    check(same, "Help leaves the shared formats' alignment as it found it");
+    check(textLeft(app, app.tocFormat, L"Heading") < 1.0f,
+          "after Help, TOC rows and the card's path still start at the left");
 }
 
 int runTabHoverCardTests() {
@@ -121,6 +313,10 @@ int runTabHoverCardTests() {
         for (float scale : {1.0f, 1.5f}) {
             app.contentScale = scale;
             updateTextFormats(app);
+            app.width = (int)(1050 * scale);
+            app.height = (int)(900 * scale);
+            helpLeavesSharedFormats(app);
+            endTabsKeepTheirHalo(app);
             for (int width : {650, 1050}) {
                 app.width = (int)(width * scale);
                 app.height = (int)(900 * scale);
@@ -243,6 +439,10 @@ int runTabHoverCardTests() {
     app.mouseY = (int)chromeTopHeight(app) + 40;
     paint(app);
     check(!cardShown(app), "no card once the pointer is off the tab");
+
+    wheelSwitchesTabs(app);
+    tabActivate(app, app.hwnd, 0);
+    paint(app);
 
     // Tabs without a file: a card only when it says something
     App::DocTab untitled;

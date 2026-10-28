@@ -48,6 +48,8 @@ inline int64_t usElapsed(Clock::time_point start) {
 #define TIMER_UPDATE_CHECK 10
 #define TIMER_SIDE_PANEL_SCROLLBARS 12
 #define TIMER_TAB_HOVER_CARD 13
+#define TIMER_TOUCH_HOLD 14
+#define TIMER_TOUCH_FLING 15
 
 // Posted to continue an incomplete document layout in time-budgeted chunks
 #define WM_APP_LAYOUT_CHUNK (WM_APP + 1)
@@ -118,6 +120,9 @@ struct D2DTheme {
     D2D1_COLOR_F syntaxControlFlow;
     // Optional themes.ini override. Missing means inherit code (#197).
     std::optional<D2D1_COLOR_F> inlineCode = std::nullopt;
+    // Optional inline-code background (#278): missing inherits
+    // codeBackground; "none" is stored as a fully transparent colour
+    std::optional<D2D1_COLOR_F> inlineCodeBackground = std::nullopt;
     std::optional<D2D1_COLOR_F> headingColors[6]{};
     std::optional<D2D1_COLOR_F> highlightBackground = std::nullopt;
     std::optional<D2D1_COLOR_F> highlightText = std::nullopt;
@@ -125,6 +130,11 @@ struct D2DTheme {
 
 inline D2D1_COLOR_F themeInlineCodeColor(const D2DTheme& theme) {
     return theme.inlineCode.value_or(theme.code);
+}
+
+// The box behind inline code; alpha 0 means the theme asked for none
+inline D2D1_COLOR_F themeInlineCodeBackground(const D2DTheme& theme) {
+    return theme.inlineCodeBackground.value_or(theme.codeBackground);
 }
 
 inline D2D1_COLOR_F themeHeadingColor(const D2DTheme& theme, int level) {
@@ -188,6 +198,12 @@ int saveCustomTheme(const D2DTheme& t, const std::wstring& name,
 
 // Persistent settings
 enum class SidePanel { None, Contents, Browser };
+// The side panels' scrolling lists (#287): the Contents outline, the file
+// browser, the search results
+enum class PanelList { None, Contents, Browser, Search };
+// What a finger drives (#286): the page (the reader or the docked
+// preview), the editor's text, or a side panel's list
+enum class TouchTarget { None, Document, Editor, List };
 
 struct Settings {
     int themeIndex = 5;          // Default to Midnight
@@ -217,6 +233,10 @@ struct Settings {
     // Plain file launches join the existing window as a new tab (Win11
     // Notepad model); off restores one window per document
     bool openInTabs = true;
+    bool keepDeletedTabs = false; // retain viewer source in RAM until close
+    // Bottom-right info and success messages (#273); warnings, errors and
+    // messages that ask something always show
+    bool showNotifications = true;
     // Last session's open tabs, restored on the next plain launch
     std::vector<std::string> sessionTabs;
     int sessionActive = 0;
@@ -425,6 +445,10 @@ struct App {
     IDWriteTextFormat* headingItalicFormats[6] = {};
     // Superscripts and subscripts in a heading, in proportion to it
     IDWriteTextFormat* headingScriptFormats[6] = {};
+    // The faces the document formats above were built from. A theme switch
+    // compares with these, not with app.theme: saving the theme in use from
+    // the theme editor rewrites the strings app.theme points into (#265)
+    std::wstring formatsFontFamily, formatsCodeFontFamily, formatsHeadingFontFamily;
 
     // Overlay text formats (cached)
     IDWriteTextFormat* searchTextFormat = nullptr;
@@ -496,8 +520,8 @@ struct App {
     int themeChooserPreviewBase = -1;
 
     // --- Tabbed interface (Win11 Notepad-style tabs in the title bar) ---
-    // A tab keeps only what the document itself cannot restore: its path
-    // and, when the user switches away mid-edit, the parked editor buffer.
+    // Keep the last readable source too: temporary files can disappear
+    // while their tabs are still open. nullopt differs from an empty file.
     // View-mode scroll positions ride the existing reading-position memory.
     struct DocTab {
         int id = 0;                // stable identity across reorders/closes
@@ -506,6 +530,7 @@ struct App {
         bool editMode = false;     // switched away while editing
         bool editorDirty = false;
         bool fileMissing = false;  // deleted/renamed on disk (red-grey dot)
+        std::optional<std::string> viewerSource;
         FILETIME lastWrite{};      // for external-change conflicts (dirty tabs)
         std::wstring editorText;   // parked edit buffer (editMode only)
         float editorScrollY = 0.0f;
@@ -515,6 +540,13 @@ struct App {
     std::vector<DocTab> tabs;
     int activeTab = 0;
     bool showTabSwitcher = false;      // chevron dropdown (open-files list)
+    // Ctrl+G's go-to-line prompt (#276): open, and the digits typed so far
+    bool gotoLineOpen = false;
+    std::wstring gotoLineInput;
+    // The wheel over the tab strip steps through tabs (#272): notches of a
+    // high-resolution wheel or touchpad add up here, and a pause resets
+    float tabWheelAccum = 0.0f;
+    std::chrono::steady_clock::time_point tabWheelLast{};
     int tabSwitcherHover = -1;
     int hoveredTab = -1;               // strip hover for close-button reveal
     // Tab hover card (#246): a resting pointer shows the tab's full name
@@ -699,7 +731,7 @@ struct App {
     std::wstring themeEditorHex[14];     // base colours, h1-h6, highlight bg/text
     int themeEditorField = -1;          // focused field: 0..13 hex, 14 = name
     int themeEditorBase = 0;            // registry index the colors started from
-    float themeEditorFontScroll = 0.0f;
+    float themeEditorFontScroll = 0.0f;  // below 0: centre the chosen face when next drawn
     bool themeEditorHeadingsOpen = false;
     float themeEditorColorScroll = 0.0f;
     D2D1_RECT_F themeEditorColorListRect{};
@@ -850,6 +882,43 @@ struct App {
         float startX = 0, startWidth = 0;
         float oldTocWidth = 0, oldBrowserWidth = 0;
     } panelResize;
+    // A drag on a side panel list's scrollbar (#287); grab is the
+    // pointer's offset into the thumb
+    struct PanelScrollbarDrag {
+        PanelList list = PanelList::None;
+        float grab = 0;
+    } panelScrollbarDrag;
+    // Touch (#286): the finger in charge of a gesture and what it drives.
+    // Further fingers are taken and ignored, and stop a tap or a hold. A
+    // pan sets the position it began at less the finger's travel, so the
+    // preview's line sync cannot eat slow pans; a fling carries its own.
+    struct TouchGesture {
+        enum Phase { Idle, Pending, Panning, Holding };
+        Phase phase = Idle;
+        bool active = false;  // a finger is in charge
+        UINT32 pointer = 0;
+        std::vector<UINT32> extra;
+        bool multi = false;  // another finger came down
+        TouchTarget target = TouchTarget::None;
+        PanelList list = PanelList::None;
+        POINT start{}, last{};
+        int axis = 0;  // while panning: 1 vertical, 2 horizontal
+        float originX = 0, originY = 0;
+        struct Sample { double ms; float x, y; };
+        std::vector<Sample> samples;  // recent positions, for a flick's speed
+        // The last tap, so a second one nearby is a double tap
+        POINT tapPoint{};
+        double tapMs = 0;
+        TouchTarget tapTarget = TouchTarget::None;
+        bool flinging = false;
+        TouchTarget flingTarget = TouchTarget::None;
+        PanelList flingList = PanelList::None;
+        float flingX = 0, flingY = 0;    // where the fling has got to
+        float flingVX = 0, flingVY = 0;  // pixels per ms, as the finger went
+        double flingMs = 0;
+        int flingTab = -1;
+        std::string flingFile;
+    } touch;
     float tocAnimation = 0.0f;  // 0 to 1 slide-in from the chosen side
     // A clicked heading stays the active row even when the scroll cannot
     // reach it (short documents); any real scroll hands back to the spy
@@ -1008,6 +1077,8 @@ struct App {
     bool browserFocusPath = false;
     // Plain file launches join this window as tabs (settings toggle)
     bool openInTabs = true;
+    bool keepDeletedTabs = false;
+    bool showNotifications = true;  // settings toggle (#273), see signals.h
     int folderSearchGeneration = 0;
     struct FolderMatch {
         std::wstring snippet;
@@ -1057,6 +1128,13 @@ struct App {
     // Document text built during render (used for search/mapping)
     std::wstring docText;
     std::wstring docTextLower;
+    // docText ranges set in **bold** and *italic*, and web and mail links,
+    // each ascending and disjoint; a copy from the viewer carries them to
+    // mail and word processors as HTML
+    std::vector<std::pair<size_t, size_t>> docBoldRanges;
+    std::vector<std::pair<size_t, size_t>> docItalicRanges;
+    struct DocLinkRange { size_t start, end; std::string url; };
+    std::vector<DocLinkRange> docLinkRanges;
 
     // Cached space widths for common formats
     float spaceWidthText = 0.0f;
@@ -1452,6 +1530,9 @@ struct App {
         lineBuckets.clear();
         docText.clear();
         docTextLower.clear();
+        docBoldRanges.clear();
+        docItalicRanges.clear();
+        docLinkRanges.clear();
         headings.clear();
         headingSlugCounts.clear();
         footnoteAnchors.clear();

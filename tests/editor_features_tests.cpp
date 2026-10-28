@@ -2,6 +2,7 @@
 #include "drafts.h"
 #include "editor.h"
 #include "input.h"
+#include "keystroke.h"
 #include "render.h"
 #include "settings.h"
 #include "tabs.h"
@@ -50,7 +51,7 @@ bool altArrow(App& app, unsigned vk) {
     return handled;
 }
 void type(App& app, const std::wstring& text) {
-    for (wchar_t ch : text) handleCharInput(app, app.hwnd, ch);
+    typeKeys(app, text);
 }
 void setText(App& app, const std::wstring& text, size_t caret) {
     editorClearExtraCarets(app);
@@ -177,7 +178,7 @@ void columnCarets(App& app) {
     check(app.editorText == L"| a_ | b |\n| c_c | d |\n|ee_e| f |\nend" &&
           carets(app) == std::vector<size_t>({4, 15, 27}),
           "typing inserts at every caret");
-    handleCharInput(app, app.hwnd, 8);
+    keystroke(app, VK_BACK);
     check(app.editorText == L"| a | b |\n| cc | d |\n|eee| f |\nend" &&
           carets(app) == std::vector<size_t>({3, 13, 24}),
           "Backspace deletes at every caret");
@@ -309,6 +310,11 @@ void wordCount(App& app) {
     editorReparse(app, true);
     check(app.editorDocCounts.words == 3 && app.editorDocCounts.characters == 19,
           "plain-text documents count as they stand");
+    app.currentFile = "diagram.puml";
+    setText(app, L"@startuml\nAlice -> Bob: hi\n@enduml", 0);
+    editorReparse(app, true);
+    check(app.editorDocCounts.words > 0 && app.editorDocCounts.characters > 0,
+          "a PlantUML source counts as it stands");
     app.currentFile = saved;
     app.showWordCount = false;
     app.renderTarget->BeginDraw();

@@ -1,12 +1,14 @@
 #include "d2d_init.h"
 #include "editor.h"
 #include "input.h"
+#include "keystroke.h"
 #include "overlays.h"
 #include "render.h"
 #include "search.h"
 #include "settings.h"
 #include "tableedit.h"
 #include "utils.h"
+#include "clipboard_snapshot.h"
 #include <fstream>
 #include <filesystem>
 #include <iostream>
@@ -18,17 +20,10 @@ void check(bool value, const char* message) {
     if (!value) { std::cerr << "FAIL: " << message << '\n'; ++failures; }
 }
 void key(App& app, unsigned vk, unsigned ch = 0, bool control = false, bool shift = false) {
-    BYTE original[256], pressed[256];
-    GetKeyboardState(original);
-    memcpy(pressed, original, sizeof pressed);
-    pressed[VK_CONTROL] = control ? 0x80 : 0;
-    pressed[VK_SHIFT] = shift ? 0x80 : 0;
-    SetKeyboardState(pressed);
-    if (!handleKeyDown(app, app.hwnd, vk) && ch) handleCharInput(app, app.hwnd, ch);
-    SetKeyboardState(original);
+    keystroke(app, vk, {control, shift}, (wchar_t)ch);
 }
 void type(App& app, const std::wstring& text) {
-    for (wchar_t ch : text) handleCharInput(app, app.hwnd, ch);
+    typeKeys(app, text);
 }
 void click(App& app, float x, float y) {
     LPARAM pt = MAKELPARAM(static_cast<int>(x), static_cast<int>(y));
@@ -79,11 +74,12 @@ void fieldEditing(App& app) {
     key(app, VK_BACK, 8, true);
     check(app.searchQuery == L"two", "Ctrl+Backspace removes the preceding word");
 
-    // Preserve the user's clipboard, including non-text formats.
-    Microsoft::WRL::ComPtr<IDataObject> clipboard;
-    HRESULT saved = OleGetClipboard(clipboard.GetAddressOf());
-    check(SUCCEEDED(saved), "clipboard can be preserved for editing tests");
-    if (SUCCEEDED(saved)) {
+    // Preserve the user's clipboard, including non-text formats. The snapshot
+    // restores it when it goes out of scope, before the check below.
+    const std::wstring before = clipboardLine(app.hwnd);
+    if (ClipboardSnapshot clipboard(app.hwnd); !clipboard.captured) {
+        check(false, "clipboard can be preserved for editing tests");
+    } else {
         query(app, L"copy me"); key(app, 'A', 1, true); key(app, 'C', 3, true);
         check(clipboardLine(app.hwnd) == L"copy me", "copy puts the selected field text on the clipboard");
         key(app, VK_END); key(app, 'V', 22, true);
@@ -92,11 +88,8 @@ void fieldEditing(App& app) {
         check(app.searchQuery.empty(), "cut removes the selected search text");
         key(app, VK_TAB); key(app, 'A', 1, true); key(app, 'V', 22, true);
         check(app.replaceText == L"copy mecopy me", "paste replaces the replacement selection");
-        HRESULT restored = E_FAIL;
-        for (int attempt = 0; attempt < 10 && FAILED(restored = OleSetClipboard(clipboard.Get())); ++attempt) Sleep(5);
-        if (FAILED(restored)) std::cerr << "clipboard restore HRESULT=" << std::hex << restored << std::dec << '\n';
-        check(SUCCEEDED(restored), "clipboard restored");
     }
+    check(clipboardLine(app.hwnd) == before, "clipboard restored");
 
     for (int theme : {0, 5}) for (bool wrap : {false, true})
     for (float scale : {1.0f, 1.5f})
@@ -195,6 +188,9 @@ void focusTransfers(App& app) {
     type(app, L"replaced"); key(app, VK_RETURN, 13);
     check(app.editorText.find(L"replaced") != std::wstring::npos, "Enter replaces the current match");
     app.currentFile = std::filesystem::absolute("find-table-focus-save.md").string();
+    // This checks normal-save focus, not deleted-file recovery. A missing
+    // original now intentionally opens Save As; create the destination first.
+    std::ofstream(app.currentFile, std::ios::binary) << toUtf8(app.editorText);
     key(app, 'S', 19, true);
     std::ifstream saved(app.currentFile, std::ios::binary);
     std::string savedText{std::istreambuf_iterator<char>(saved), std::istreambuf_iterator<char>()};

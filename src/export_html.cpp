@@ -177,6 +177,7 @@ struct WrappedLines {
     std::vector<float> baselines;  // from block top
     float width = 0.0f;
     float height = 0.0f;
+    float minWidth = 0.0f;  // the widest word, which wrapping never breaks
 };
 
 WrappedLines wrapLines(App& app, const std::wstring& text, float wrapWidth,
@@ -203,6 +204,8 @@ WrappedLines wrapLines(App& app, const std::wstring& text, float wrapWidth,
     layout->GetMetrics(&metrics);
     out.width = metrics.widthIncludingTrailingWhitespace;
     out.height = metrics.height;
+    FLOAT minWidth = 0.0f;
+    if (SUCCEEDED(layout->DetermineMinWidth(&minWidth))) out.minWidth = minWidth;
     UINT32 lineCount = 0;
     layout->GetLineMetrics(nullptr, 0, &lineCount);
     std::vector<DWRITE_LINE_METRICS> lm(lineCount);
@@ -382,6 +385,15 @@ mermaidext::Prim flowShapePrim(const mermaid::Node& node,
                          {rect.left, rect.top + h * 0.5f}};
             break;
         }
+        case mermaid::NodeShape::Asymmetric:
+            shape.type = PrimType::Polygon;
+            shape.pts = {{rect.left, rect.top},
+                         {rect.right, rect.top},
+                         {rect.right, rect.bottom},
+                         {rect.left, rect.bottom},
+                         {rect.left + mermaid::leftNotch(node.shape, h),
+                          rect.top + h * 0.5f}};
+            break;
         case mermaid::NodeShape::Circle:
             shape.type = PrimType::Ellipse;
             shape.x1 = rect.left;
@@ -456,6 +468,7 @@ mermaidext::Built buildFlowchartPrims(App& app, const std::string& source,
             width = diameter;
             height = diameter;
         }
+        width += mermaid::leftNotch(node.shape, height);
         labels.push_back(std::move(label));
         nodeSizes.push_back({width, height});
         styles.push_back(flowResolveStyle(app, diagram, node, scale));
@@ -476,9 +489,15 @@ mermaidext::Built buildFlowchartPrims(App& app, const std::string& source,
         edgeLabel.text = toWide(diagram.edges[i].label);
         WrappedLines single =
             wrapLines(app, edgeLabel.text, 0.0f, textStyle, scale);
+        // Sized as in the viewer (#281): a pixel of slack, and a word longer
+        // than the cap widens the label, up to twice the cap, rather than
+        // break in the middle
         edgeLabel.width = std::min(
             180.0f * scale,
-            std::max(60.0f * scale, single.width + labelPadX * 2.0f));
+            std::max(60.0f * scale, std::ceil(single.width) + 1.0f + labelPadX * 2.0f));
+        edgeLabel.width = std::max(
+            edgeLabel.width,
+            std::min(360.0f * scale, std::ceil(single.minWidth) + 1.0f + labelPadX * 2.0f));
         WrappedLines wrapped = wrapLines(
             app, edgeLabel.text, edgeLabel.width - labelPadX * 2.0f,
             textStyle, scale);
@@ -560,6 +579,12 @@ mermaidext::Built buildFlowchartPrims(App& app, const std::string& source,
         boundsR = std::max(boundsR, box.right);
         boundsB = std::max(boundsB, box.bottom);
     }
+    // A node's left side at mid-height, where a notch has its tip
+    auto leftSide = [&](size_t node) {
+        const auto& rect = nodeRects[node];
+        return rect.left + mermaid::leftNotch(diagram.nodes[node].shape,
+                                              rect.bottom - rect.top);
+    };
     size_t exteriorLane = 0;
     std::vector<mermaid::Rect> placedLabelRects;
     placedLabelRects.reserve(diagram.edges.size());
@@ -652,9 +677,9 @@ mermaidext::Built buildFlowchartPrims(App& app, const std::string& source,
                 };
             } else if (forward) {
                 D2D1_POINT_2F start = D2D1::Point2F(
-                    leftToRight ? from.right : from.left, fromCenterY);
+                    leftToRight ? from.right : leftSide(edge.from), fromCenterY);
                 D2D1_POINT_2F end = D2D1::Point2F(
-                    leftToRight ? to.left : to.right, toCenterY);
+                    leftToRight ? leftSide(edge.to) : to.right, toCenterY);
                 float middleX = (start.x + end.x) * 0.5f;
                 conn.points = {
                     start,
@@ -885,7 +910,8 @@ mermaidext::Built buildFlowchartPrims(App& app, const std::string& source,
         } else {
             label.fill = Role::Text;
         }
-        label.x1 = rect.left + insetX;
+        label.x1 = rect.left +
+                   mermaid::leftNotch(node.shape, rect.bottom - rect.top) + insetX;
         label.y1 = rect.top + insetY;
         label.x2 = rect.right - insetX;
         label.y2 = rect.bottom - insetY;
@@ -1501,8 +1527,12 @@ std::string themeCss(const App& app, const std::string& bodyFont,
     css += "a{color:" + colorCss(t.link) + ";}";
     css += ".wikilink{color:" + colorCss(t.link) +
            ";border-bottom:1px dashed " + colorCss(t.link) + ";}";
+    // Inline code may drop its box (inlinecodebackground=none, #278); code
+    // blocks keep codebackground through pre below
+    const D2D1_COLOR_F inlineBox = themeInlineCodeBackground(t);
     css += "code{font-family:" + monoFont + ";background:" +
-           colorCss(t.codeBackground) + ";color:" + colorCss(themeInlineCodeColor(t)) +
+           (inlineBox.a > 0.0f ? colorCss(inlineBox) : std::string("none")) +
+           ";color:" + colorCss(themeInlineCodeColor(t)) +
            ";padding:2px 6px;border-radius:4px;font-size:0.9em;}";
     css += "pre{background:" + colorCss(t.codeBackground) +
            ";padding:14px 16px;border-radius:8px;overflow-x:auto;}";

@@ -48,37 +48,20 @@ jobs:
             ### Installation
             - Easiest: `winget install "Tinta Markdown Viewer" -s msstore` (Store-signed, no security prompts, auto-updates), or the [Microsoft Store page](https://apps.microsoft.com/detail/9MZ5MZ3L9RKF)
             - Portable: download `tinta.exe` below and run it (SmartScreen may ask: "More info", then "Run anyway")
-            - Optionally run `tinta.exe /register` to register Markdown and Mermaid files
+            - Optionally run `tinta.exe /register` to register Markdown, Mermaid and PlantUML files
 
-            ### Search results panel (#246)
-            - Ctrl+Shift+F, or the new list button at the end of the search bar, opens a Results panel beside the page: every match with a snippet, grouped under its heading (#246)
-            - Matches in your other open tabs and in the document's folder follow, by line. A click opens the file in its own tab at that match, and two checkboxes choose what else is searched (#246)
-            - Suggested by @Lex987 (#246)
-
-            ### Tab hover card (#246)
-            - Resting the pointer on a tab shows its full name, its folder and what its dot means, so two README.md tabs can be told apart (#246)
-            - Suggested by @Lex987 (#246)
-
-            ### Docked edit-mode preview (#245)
-            - The preview in edit mode is docked beside the editor like the side panels, below a tab strip that spans the window, instead of floating over it (#245)
-            - The Esc hint and the Read button's introduction show in your first three edit sessions only, and fade in place (#245)
-            - Reported by @whiskyrye (#245)
-
-            ### Print margins (#257)
-            - The print preview chooses the page margins, 12.7, 19.05 or 25.4 mm (in inches where Windows measures in inches), and remembers the choice (#257)
+            A fix release for 3.9.2. For what is new in 3.9 (go to line with Ctrl+G, the Russian interface, keeping deleted files in memory and more), see the [v3.9.2 notes](https://github.com/oipoistar/tinta/releases/tag/v3.9.2).
 
             ### Fixed
-            - Interface text uses the interface language's font, so a Chinese, Japanese or Korean interface no longer mixes fonts from other languages. Reported by @go4399 (#254)
-            - Links to raw HTML anchors such as `<a id="a1"></a>` jump to them, and the tags no longer show as text. Reported by @derek-price (#255)
-            - Word export uses the screen's font for Chinese text, also for code and the theme's heading font. Reported by @go4399 (#256)
-            - Printing and PDF use the full width between the page margins whatever the reading width, and every code block lines up with the text. Reported by @go4399 (#257)
-            - Printing and PDF keep a custom theme's fonts. Reported by @go4399 (#258)
-            - Double-clicking a word in a table cell selects only that word, and a copied row pastes into a spreadsheet as separate columns. Spotted by @Lex987 (#246)
-            - An open search follows tab switches and file reloads (#246)
+            - Ctrl+G's go-to-line prompt takes the line number again: in 3.9.2 nothing could be typed into it, and clicking it closed it. Reported by @derek-price (#282)
+            - Mermaid state diagrams draw composite states, `state Name { … }`, nested and with concurrent regions split by `--`; such a diagram showed its source before
+            - In Mermaid state, class and ER diagrams, edges no longer run through other boxes, and edge labels and notes no longer cover them, in every direction
+            - Mermaid C4 relationship labels sit clear of the boxes and of each other instead of covering the boxes' text
+            - Mermaid flowcharts draw the asymmetric `id>text]` shape and read longer links such as `--->`, `===>` and `-..->`; both drew wrong nodes before
 
             ### What's included
             - Export as HTML, DOCX, or PDF, plus optional Pandoc formats
-            - 22 natively rendered Mermaid diagram families
+            - 22 natively rendered Mermaid diagram families, and PlantUML diagrams through a local PlantUML
             - Tabbed interface with drag, session restore, and a tab context menu
             - 10 tuned themes (5 light, 5 dark) plus custom themes
             - Hardware-accelerated rendering via Direct2D

@@ -1,4 +1,5 @@
 #include "mermaid.h"
+#include "mermaid_ext.h"
 
 #include <algorithm>
 #include <cctype>
@@ -44,6 +45,7 @@ constexpr Delimiter kDelimiters[] = {
     { "{{", "}}", NodeShape::Hexagon },
     { "[/", "/]", NodeShape::Rectangle },
     { "[\\", "\\]", NodeShape::Rectangle },
+    { ">", "]", NodeShape::Asymmetric },
     { "(", ")", NodeShape::RoundedRectangle },
     { "{", "}", NodeShape::Diamond },
     { "[", "]", NodeShape::Rectangle },
@@ -94,18 +96,109 @@ std::string_view readWord(std::string_view value, size_t& position) {
     return value.substr(start, position - start);
 }
 
-bool isArrowAt(std::string_view value, size_t position) {
-    return startsWithAt(value, position, "-->") ||
-        startsWithAt(value, position, "---") ||
-        startsWithAt(value, position, "-.->") ||
-        startsWithAt(value, position, "==>");
+// A Mermaid link. A longer one (--->, ===>, -..->, ----) is the same edge
+// as its short form: Mermaid stretches it over more ranks, which Tinta's
+// layout does not, since an edge across ranks would go round them.
+struct Link {
+    size_t length = 0;         // 0: no whole link here
+    bool unsupported = false;  // circle or cross ends, ~~~: not drawn
+    bool directed = false;
+    bool dashed = false;
+    float strokeScale = 1.0f;
+};
+
+// The link at position, or the end of dotted edge text (.->, ..-) when
+// dottedEnd is set
+Link linkAt(std::string_view value, size_t position, bool dottedEnd = false) {
+    auto at = [&](size_t i) { return i < value.size() ? value[i] : '\0'; };
+    Link link;
+    size_t end = position;
+    const char first = at(position);
+    if (dottedEnd || (first == '-' && at(position + 1) == '.')) {
+        // Dotted: -.- and -.->, with any number of dots
+        end = dottedEnd ? position : position + 1;
+        if (at(end) != '.') return link;
+        while (at(end) == '.') end++;
+        if (at(end) != '-') return link;  // "-." opens dotted edge text
+        end++;
+        link.dashed = true;
+    } else if (first == '-' || first == '=') {
+        // Solid and thick: two or more before a '>', three or more open
+        while (at(end) == first) end++;
+        if (end - position < 2) return link;
+        link.strokeScale = first == '=' ? 2.0f : 1.0f;
+        if (at(end) != '>' && end - position < 3) {
+            // "--" and "==" open edge text, but --o and --x are ends
+            link.unsupported = at(end) == 'o' || at(end) == 'x';
+            return link;
+        }
+    } else {
+        while (at(end) == '~') end++;
+        link.unsupported = end - position >= 3;  // ~~~, an invisible link
+        return link;
+    }
+    if (at(end) == '>') {
+        link.directed = true;
+        end++;
+    } else if (at(end) == 'o' || at(end) == 'x') {
+        link.unsupported = true;
+        return link;
+    }
+    link.length = end - position;
+    return link;
 }
+
+// "-- text -->", "== text ==>" and "-. text .->" open with two characters
+bool opensLinkText(std::string_view value, size_t position) {
+    return startsWithAt(value, position, "--") || startsWithAt(value, position, "==") ||
+           startsWithAt(value, position, "-.");
+}
+
+bool isArrowAt(std::string_view value, size_t position) {
+    const Link link = linkAt(value, position);
+    return link.length > 0 || link.unsupported || opensLinkText(value, position);
+}
+
+// The ']' closing the unquoted label of an asymmetric node (id>text])
+// whose '>' is at position, or npos. A '>' after anything but a node ID
+// opens no label, nor does one that meets an arrow or the line's end first;
+// a quoted label is kept whole by its quotes.
+size_t asymmetricLabelEnd(std::string_view text, size_t position) {
+    const auto before = static_cast<unsigned char>(position > 0 ? text[position - 1] : ' ');
+    if (!std::isalnum(before) && before != '_' && before < 0x80) {
+        return std::string_view::npos;
+    }
+    size_t i = position + 1;
+    while (i < text.size() && (text[i] == ' ' || text[i] == '\t')) i++;
+    if (i < text.size() && (text[i] == '"' || text[i] == '\'')) {
+        return std::string_view::npos;
+    }
+    for (; i < text.size() && text[i] != '\n'; i++) {
+        if (text[i] == ']') return i;
+        if (isArrowAt(text, i)) break;
+    }
+    return std::string_view::npos;
+}
+
+// A line break inside a double-quoted string, kept in the statement as one
+// character of the same width (#281)
+constexpr char kQuotedLineBreak = '\x1F';
 
 std::string decodeLabel(std::string_view encoded) {
     std::string decoded;
     decoded.reserve(encoded.size());
 
     for (size_t i = 0; i < encoded.size();) {
+        if (encoded[i] == kQuotedLineBreak) {
+            // The label's own line break; the source's indentation and
+            // line endings around it are not part of the text
+            while (!decoded.empty() && isSpace(decoded.back())) decoded.pop_back();
+            decoded.push_back('\n');
+            i++;
+            while (i < encoded.size() && isSpace(encoded[i])) i++;
+            continue;
+        }
+
         if (encoded[i] == '\\' && i + 1 < encoded.size()) {
             char next = encoded[i + 1];
             if (next == '"' || next == '\'' || next == '\\') {
@@ -339,12 +432,20 @@ bool parseNodeSpec(std::string_view line, size_t& position, size_t sourceOffset,
 
     while (position < line.size()) {
         char c = line[position];
-        if (isSpace(c) || c == '[' || c == '(' || c == '{' ||
-            c == ':' || c == ';' || c == ',') {
+        if (isSpace(c) || c == '[' || c == '(' || c == '{' || c == '>' ||
+            c == '<' || c == ':' || c == ';' || c == ',') {
             break;
         }
         if (isArrowAt(line, position)) break;
         position++;
+    }
+
+    // A '>' straight after '-' or '=' heads an arrow Mermaid does not have
+    // (->, =>), not an asymmetric node
+    if (position > 0 && position < line.size() && line[position] == '>' &&
+        (line[position - 1] == '-' || line[position - 1] == '=')) {
+        error = "Unsupported edge syntax";
+        return false;
     }
 
     if (position == idStart) {
@@ -437,6 +538,30 @@ bool parseNodeSpec(std::string_view line, size_t& position, size_t sourceOffset,
     return true;
 }
 
+// An edge's text. Quotes around it delimit a Mermaid string, as they do in
+// a node's label, and are not part of the text (#281).
+std::string decodeEdgeLabel(std::string_view text) {
+    text = trim(text);
+    if (text.size() >= 2 && text.front() == '"' && text.back() == '"') {
+        text = text.substr(1, text.size() - 2);
+    }
+    return decodeLabel(text);
+}
+
+// Past the double-quoted string starting at position, or position itself
+// when none starts there
+size_t skipQuotedString(std::string_view line, size_t position) {
+    if (position >= line.size() || line[position] != '"') return position;
+    for (size_t i = position + 1; i < line.size(); i++) {
+        if (line[i] == '\\') {
+            i++;
+        } else if (line[i] == '"') {
+            return i + 1;
+        }
+    }
+    return position;
+}
+
 bool parseArrow(std::string_view line, size_t& position, ArrowSpec& arrow,
                 std::string& error,
                 std::unordered_set<std::string>* edgeIds = nullptr) {
@@ -463,33 +588,41 @@ bool parseArrow(std::string_view line, size_t& position, ArrowSpec& arrow,
         }
     }
 
-    if (startsWithAt(line, position, "-.->")) {
-        arrow.directed = true;
-        arrow.dashed = true;
-        position += 4;
-    } else if (startsWithAt(line, position, "==>")) {
-        arrow.directed = true;
-        arrow.strokeScale = 2.0f;
-        position += 3;
-    } else if (startsWithAt(line, position, "-->")) {
-        arrow.directed = true;
-        position += 3;
-    } else if (startsWithAt(line, position, "---")) {
-        arrow.directed = false;
-        position += 3;
-    } else if (startsWithAt(line, position, "--")) {
-        size_t endArrow = line.find("-->", position + 2);
-        if (endArrow == std::string_view::npos) {
+    Link link = linkAt(line, position);
+    if (link.unsupported) {
+        error = "Unsupported edge syntax";
+        return false;
+    }
+    if (link.length > 0) {
+        position += link.length;
+    } else if (opensLinkText(line, position)) {
+        // "-- text -->", "== text ==>", "-. text .->": the text runs to the
+        // first link of its own kind; a quoted text may hold anything, an
+        // arrow included
+        const char kind = line[position + 1];
+        size_t textStart = position + 2;
+        skipSpaces(line, textStart);
+        size_t textEnd = skipQuotedString(line, textStart);
+        for (; textEnd < line.size(); textEnd++) {
+            link = linkAt(line, textEnd, kind == '.');
+            if (link.length > 0 && (kind == '.' || (!link.dashed &&
+                                                    (link.strokeScale > 1.0f) == (kind == '=')))) {
+                break;
+            }
+        }
+        if (textEnd >= line.size()) {
             error = "Unsupported edge syntax";
             return false;
         }
-        arrow.directed = true;
-        arrow.label = std::string(trim(line.substr(position + 2, endArrow - position - 2)));
-        position = endArrow + 3;
+        arrow.label = decodeEdgeLabel(line.substr(position + 2, textEnd - position - 2));
+        position = textEnd + link.length;
     } else {
         error = "Expected a Mermaid edge";
         return false;
     }
+    arrow.directed = link.directed;
+    arrow.dashed = link.dashed;
+    arrow.strokeScale = link.strokeScale;
 
     skipSpaces(line, position);
     if (position < line.size() && line[position] == '|') {
@@ -498,7 +631,7 @@ bool parseArrow(std::string_view line, size_t& position, ArrowSpec& arrow,
             error = "Unterminated edge label";
             return false;
         }
-        arrow.label = decodeLabel(line.substr(position + 1, labelEnd - position - 1));
+        arrow.label = decodeEdgeLabel(line.substr(position + 1, labelEnd - position - 1));
         position = labelEnd + 1;
     }
     return true;
@@ -556,6 +689,13 @@ ParseResult fail(ParseResult result, size_t line, std::string message) {
 
 ParseResult parse(std::string_view source) {
     std::string normalized(source);
+    // YAML front matter (#261) is blanked, its line breaks kept, so error
+    // lines still count from the top of the fence
+    const size_t frontMatter = static_cast<size_t>(
+        mermaidext::skipFrontMatter(source).data() - source.data());
+    for (size_t i = 0; i < frontMatter; i++) {
+        if (normalized[i] != '\n') normalized[i] = ' ';
+    }
     if (normalized.size() >= 3 &&
         static_cast<unsigned char>(normalized[0]) == 0xEF &&
         static_cast<unsigned char>(normalized[1]) == 0xBB &&
@@ -575,6 +715,13 @@ ParseResult parse(std::string_view source) {
     for (size_t i = 0; i < normalized.size(); i++) {
         char& c = normalized[i];
         if (c == '\n') {
+            // A double-quoted string runs on to its closing quote, as in
+            // Mermaid, and its line breaks are the label's (#281): the
+            // statement continues on the next line
+            if (quote == '"') {
+                c = kQuotedLineBreak;
+                continue;
+            }
             comment = false;
             pipeLabel = false;
             continue;
@@ -603,6 +750,15 @@ ParseResult parse(std::string_view source) {
             squareDepth == 0 && roundDepth == 0 && curlyDepth == 0) {
             comment = true;
             continue;
+        }
+        // An asymmetric node's unquoted label keeps its ';' and '|', as a
+        // bracketed one does
+        if (c == '>' && squareDepth == 0 && roundDepth == 0 && curlyDepth == 0) {
+            size_t close = asymmetricLabelEnd(normalized, i);
+            if (close != std::string_view::npos) {
+                i = close;
+                continue;
+            }
         }
         if (c == '|' && squareDepth == 0 && roundDepth == 0 && curlyDepth == 0) {
             pipeLabel = true;
@@ -848,6 +1004,9 @@ ParseResult parse(std::string_view source) {
         }
 
         if (lineEnd == source.size()) break;
+        // Lines a quoted string ran over still count for the error lines
+        lineNumber += static_cast<size_t>(std::count(
+            source.begin() + lineOffset, source.begin() + lineEnd, kQuotedLineBreak));
         lineOffset = lineEnd + 1;
     }
 

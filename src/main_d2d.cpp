@@ -41,7 +41,7 @@
 #include <thread>
 #pragma comment(lib, "winhttp.lib")
 #include "input.h"
-#include "touch_pan.h"
+#include "touch.h"
 #include "editor.h"
 #include "print.h"
 #include "export.h"
@@ -52,46 +52,6 @@
 #pragma comment(lib, "dbghelp.lib")
 
 static App* g_app = nullptr;
-
-// Windows can promote touchscreen taps/pans into compatibility mouse events.
-// A pan must not turn into a selection or a link activation on release.
-struct TouchPanState {
-    bool active = false;
-    bool swallowTouchMouseUp = false;
-    int previousScreenY = 0;
-};
-static TouchPanState g_touchPan;
-
-static bool touchGeneratedMouseMessage() {
-    constexpr ULONG_PTR kSignatureMask = 0xFFFFFF00u;
-    constexpr ULONG_PTR kTouchSignature = 0xFF515700u;
-    return (static_cast<ULONG_PTR>(GetMessageExtraInfo()) & kSignatureMask)
-        == kTouchSignature;
-}
-
-static bool canPanReaderAt(const App& app, HWND hwnd, POINT screen) {
-    POINT p = screen;
-    if (!ScreenToClient(hwnd, &p)) return false;
-    if (p.x < 0 || p.x >= app.width || p.y < 0 || p.y >= app.height) return false;
-    if (static_cast<float>(p.y) < chromeTopHeight(app)) return false;
-    // Read-only document surface only. Let the existing input handlers own
-    // editing, menus, overlays, and all popup panels.
-    if (app.editMode || app.showHelp || app.showSettings ||
-        app.showPrintPreview || app.showLightbox || app.showThemeEditor ||
-        app.showContextMenu || app.showTabMenu || app.contentHeight <= app.height) {
-        return false;
-    }
-    if (app.showFolderBrowser) {
-        const auto panel = folderBrowserMetrics(app);
-        if (p.x >= panel.cardLeft && p.x <= panel.cardRight &&
-            p.y >= panel.cardTop && p.y <= panel.cardBottom) return false;
-    }
-    if (app.showToc) {
-        const auto r = tocListRect(app);
-        if (p.x >= r.left && p.x <= r.right) return false;
-    }
-    return true;
-}
 
 // Initializes the GPU driver on a worker thread after the first (software)
 // frame is on screen. D3D device creation costs ~200 ms dominated by
@@ -198,67 +158,8 @@ void render(App& app) {
                                               app.contentHeight);
     }
 
-    // Sync preview scroll to editor scroll position using source-offset anchors
-    if (editorPreviewVisible(app) && !app.editorReadingPreview && !app.scrollAnchors.empty() &&
-        !app.editorLineByteOffsets.empty()) {
-        // Find the editor's top visible line (row-aware in wrap mode)
-        int topLine = (int)editorTopVisibleLine(app);
-        topLine = std::max(0, std::min(topLine, (int)app.editorLineByteOffsets.size() - 1));
-        size_t topByteOffset = app.editorLineByteOffsets[topLine];
-
-        // Binary search for the anchor just before this byte offset
-        size_t lo = 0, hi = app.scrollAnchors.size();
-        while (lo + 1 < hi) {
-            size_t mid = (lo + hi) / 2;
-            if (app.scrollAnchors[mid].sourceOffset <= topByteOffset) lo = mid;
-            else hi = mid;
-        }
-
-        // Interpolate between anchor[lo] and anchor[lo+1]
-        float targetY;
-        if (lo + 1 < app.scrollAnchors.size() &&
-            app.scrollAnchors[lo + 1].sourceOffset > app.scrollAnchors[lo].sourceOffset) {
-            float t = (float)(topByteOffset - app.scrollAnchors[lo].sourceOffset) /
-                      (float)(app.scrollAnchors[lo + 1].sourceOffset - app.scrollAnchors[lo].sourceOffset);
-            t = std::max(0.0f, std::min(t, 1.0f));
-            targetY = app.scrollAnchors[lo].renderedY +
-                       t * (app.scrollAnchors[lo + 1].renderedY - app.scrollAnchors[lo].renderedY);
-        } else {
-            // Last anchor or single anchor — use ratio for remaining content
-            targetY = app.scrollAnchors[lo].renderedY;
-            if (app.contentHeight > app.scrollAnchors[lo].renderedY) {
-                size_t lastOffset = app.scrollAnchors[lo].sourceOffset;
-                size_t totalBytes = app.editorLineByteOffsets.back();
-                if (totalBytes > lastOffset) {
-                    float t = (float)(topByteOffset - lastOffset) / (float)(totalBytes - lastOffset);
-                    t = std::max(0.0f, std::min(t, 1.0f));
-                    targetY += t * (app.contentHeight - app.scrollAnchors[lo].renderedY);
-                }
-            }
-        }
-
-        // The docked pane runs to the window's bottom edge (#245), so the
-        // preview scrolls exactly as far as the reader does
-        float previewMaxScroll =
-            std::max(0.0f, app.contentHeight - (float)app.height);
-        // renderedY includes the page's top padding below the strip;
-        // subtract it so an editor at its top means a page at its top, and
-        // snap the last half-line so the page top is always reachable
-        // (t11 feedback)
-        float alignY = targetY - documentContentTop(app);
-        float synced = std::max(0.0f, std::min(alignY, previewMaxScroll));
-        if (app.editorScrollY <= 0.5f) synced = 0.0f;
-        float editorMax = std::max(0.0f, app.editorContentHeight - (float)app.height);
-        if (app.editorScrollY >= editorMax - 1.0f) {
-            // The editor has bottomed out, but rendered content is taller
-            // than its source (images, diagrams): let the preview overshoot
-            // to reach its tail (#85). Scrolling the editor up re-syncs.
-            app.scrollY = std::min(std::max(app.scrollY, synced), previewMaxScroll);
-        } else {
-            app.scrollY = synced;
-        }
-        app.targetScrollY = app.scrollY;
-    }
+    // The preview follows the editor through source-offset anchors
+    syncPreviewToEditor(app);
 
     // Edit mode: split view rendering — the source on the desk surface,
     // the preview docked beside it on the reader's page (#245)
@@ -849,7 +750,6 @@ render_document:
     // Determine scrollbar visibility
     bool needsVScroll = app.verticalScrollbarVisible;
     bool needsHScroll = app.contentWidth > documentWidth;
-    float scrollbarSize = dpi(app, 14.0f);
 
     // In the panel layout, scrollbars appear on activity and quietly fade out.
     const ULONGLONG scrollNow = GetTickCount64();
@@ -872,17 +772,14 @@ render_document:
     // Scrollbar color: dark on light themes, light on dark themes
     float sbColorValue = app.theme.isDark ? 1.0f : 0.0f;
 
-    // Draw vertical scrollbar
+    // Draw vertical scrollbar, where presses and drags find it (#287)
     if (needsVScroll) {
+        const ScrollbarGeometry vBar = documentScrollbarV(app);
         float scrollExtent = std::max((float)app.height, app.scrollbarContentHeight);
-        float scrollbarMaxY = std::max(0.0f, scrollExtent - app.height);
-        float trackTop = chromeTopHeight(app);
-        float trackHeight =
-            app.height - trackTop - (needsHScroll ? scrollbarSize : 0);
-        float sbHeight = trackHeight / scrollExtent * trackHeight;
-        sbHeight = std::max(sbHeight, dpi(app, 30.0f));
-        float sbY = trackTop +
-            ((scrollbarMaxY > 0) ? (app.scrollY / scrollbarMaxY * (trackHeight - sbHeight)) : 0);
+        float trackTop = vBar.trackStart;
+        float trackHeight = vBar.trackLength;
+        float sbHeight = vBar.thumbLength;
+        float sbY = vBar.thumbStart;
 
         float sbWidth = quietScrollbars ? dpi(app, 4.0f) :
             ((app.scrollbarHovered || app.scrollbarDragging) ? dpi(app, 10.0f) : dpi(app, 6.0f));
@@ -950,11 +847,11 @@ render_document:
 
     // Draw horizontal scrollbar
     if (needsHScroll) {
-        float scrollbarMaxX = std::max(0.0f, app.contentWidth - documentWidth);
-        float trackWidth = documentWidth - (needsVScroll ? scrollbarSize : 0);
-        float sbWidth = trackWidth / app.contentWidth * trackWidth;
-        sbWidth = std::max(sbWidth, dpi(app, 30.0f));
-        float sbX = (scrollbarMaxX > 0) ? (app.scrollX / scrollbarMaxX * (trackWidth - sbWidth)) : 0;
+        // The geometry is in window coordinates; this pass draws offset by
+        // the viewport's left edge
+        const ScrollbarGeometry hBar = documentScrollbarH(app);
+        float sbWidth = hBar.thumbLength;
+        float sbX = hBar.thumbStart - documentViewportX(app);
 
         float sbHeight = quietScrollbars ? dpi(app, 4.0f) :
             ((app.hScrollbarHovered || app.hScrollbarDragging) ? dpi(app, 10.0f) : dpi(app, 6.0f));
@@ -1148,6 +1045,9 @@ render_document:
         if (app.showSearch) renderSearchOverlay(app);
     }
 
+    // Ctrl+G's go-to-line prompt, at the top of the pane it acts on (#276)
+    renderGotoLinePrompt(app);
+
     // Signal chips: every notification, one bottom-right system (t13).
     // Drawn after the edit-mode clip pops and above the side panels, so
     // chips reach the corner in both modes and over a pinned Contents
@@ -1281,19 +1181,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     App* app = g_app;
 
     switch (msg) {
-        case WM_CREATE: {
-            // Track one finger vertically without kinetic flings. The OS
-            // recognizer handles the pan threshold; our code applies only
-            // physical finger displacement (with bounded per-event deltas).
-            GESTURECONFIG gc = {
-                GID_PAN,
-                GC_PAN | GC_PAN_WITH_SINGLE_FINGER_VERTICALLY,
-                GC_PAN_WITH_INERTIA | GC_PAN_WITH_GUTTER
-            };
-            SetGestureConfig(hwnd, 0, 1, &gc, sizeof(gc));
-            return 0;
-        }
-
         case WM_NCCALCSIZE: {
             // Reclaim the caption: the title bar becomes the tab strip.
             // DefWindowProc computes the resize borders, then the top edge
@@ -1363,11 +1250,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
 
         case WM_KILLFOCUS:
-            g_touchPan.active = false;
-            g_touchPan.swallowTouchMouseUp = false;
             if (app) tabHoverCardDismiss(*app, hwnd);
             if (app) searchInputMouseUp(*app);
             if (app) cancelDocumentScrollbarDrag(*app, hwnd);
+            if (app) panelScrollbarEnd(*app, hwnd, true);
             if (app) sidePanelResizeEnd(*app, hwnd, true);
             if (app && app->showContextMenu) {
                 closeContextMenu(*app);
@@ -1561,86 +1447,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
-        case WM_GESTURE: {
-            auto handle = reinterpret_cast<HGESTUREINFO>(lParam);
-            GESTUREINFO info{};
-            info.cbSize = sizeof(info);
-            if (!GetGestureInfo(handle, &info))
-                return DefWindowProcW(hwnd, msg, wParam, lParam);
-            if (info.dwID == GID_PAN && app) {
-                if (info.dwFlags & GF_BEGIN) {
-                    POINT screen{info.ptsLocation.x, info.ptsLocation.y};
-                    g_touchPan.active = canPanReaderAt(*app, hwnd, screen);
-                    g_touchPan.previousScreenY = info.ptsLocation.y;
-                    if (g_touchPan.active) {
-                        g_touchPan.swallowTouchMouseUp = true;
-                        // The emulated mouse-down may have armed selection.
-                        app->mouseDown = false;
-                        app->selecting = false;
-                        app->selAutoScrollVel = 0.0f;
-                        KillTimer(hwnd, TIMER_SELECT_SCROLL);
-                        if (GetCapture() == hwnd) ReleaseCapture();
-                    }
-                }
-                const bool handled = g_touchPan.active;
-                if (handled && !(info.dwFlags & (GF_BEGIN | GF_END | GF_INERTIA))) {
-                    const float dy = static_cast<float>(info.ptsLocation.y) -
-                                     static_cast<float>(g_touchPan.previousScreenY);
-                    app->scrollY = tinta_touch::applyPan(
-                        app->scrollY, dy, app->contentHeight,
-                        static_cast<float>(app->height));
-                    app->targetScrollY = app->scrollY;
-                    // A link preview anchored to the old scroll position
-                    // must not float over newly scrolled content.
-                    if (app->linkPeekActive || !app->linkPeekUrl.empty()) {
-                        app->linkPeekActive = false;
-                        app->linkPeekUrl.clear();
-                        if (app->linkPeekBitmap) {
-                            app->linkPeekBitmap->Release();
-                            app->linkPeekBitmap = nullptr;
-                        }
-                        KillTimer(hwnd, TIMER_LINK_PEEK);
-                    }
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                }
-                g_touchPan.previousScreenY = info.ptsLocation.y;
-                if (info.dwFlags & GF_END) g_touchPan.active = false;
-                if (handled) {
-                    CloseGestureInfoHandle(handle);
-                    return 0;
-                }
-            }
-            // Let Windows handle non-pan gestures and gestures over controls.
-            // DefWindowProc owns their gesture-info handles.
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
-        }
-
         case WM_MOUSEWHEEL:
+            if (app) touchStopFling(*app, hwnd);
             if (app) handleMouseWheel(*app, hwnd, wParam, lParam);
             return 0;
 
         case WM_MOUSEHWHEEL:
+            if (app) touchStopFling(*app, hwnd);
             if (app) handleMouseHWheel(*app, hwnd, wParam, lParam);
             return 0;
 
         case WM_MOUSEMOVE:
-            if (g_touchPan.active && touchGeneratedMouseMessage()) return 0;
             if (app) handleMouseMove(*app, hwnd, lParam);
             return 0;
 
         case WM_LBUTTONDOWN:
-            // The next distinct tap must never inherit a previous swipe's
-            // suppression flag.
-            if (touchGeneratedMouseMessage() && !g_touchPan.active)
-                g_touchPan.swallowTouchMouseUp = false;
+            if (app) touchStopFling(*app, hwnd);
             if (app) handleMouseDown(*app, hwnd, wParam, lParam);
             return 0;
 
+        case WM_POINTERDOWN:
+        case WM_POINTERUPDATE:
+        case WM_POINTERUP:
+        case WM_POINTERCAPTURECHANGED:
+            // A finger pans, taps and holds here (#286); the pen, and the
+            // touches left to them, go on to Windows' mouse emulation
+            if (app && handlePointerMessage(*app, hwnd, msg, wParam, lParam)) return 0;
+            break;
+
         case WM_LBUTTONUP:
-            if (g_touchPan.swallowTouchMouseUp && touchGeneratedMouseMessage()) {
-                g_touchPan.swallowTouchMouseUp = false;
-                return 0;
-            }
             if (app) handleMouseUp(*app, hwnd, wParam, lParam);
             return 0;
 
@@ -1677,6 +1512,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             if (app && (HWND)lParam != hwnd) cancelDocumentScrollbarDrag(*app, hwnd);
+            if (app && (HWND)lParam != hwnd) panelScrollbarEnd(*app, hwnd, true);
             if (app && (HWND)lParam != hwnd) sidePanelResizeEnd(*app, hwnd, true);
             // Losing capture mid tab-drag (Alt+Tab, a popup stealing the
             // mouse) aborts the drag instead of leaving a stray ghost
@@ -1686,8 +1522,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_CANCELMODE:
-            g_touchPan.active = false;
-            g_touchPan.swallowTouchMouseUp = false;
             if (app) cancelAppMenuPress(*app, hwnd);
             if (app) tableEditMouseUp(*app);
             if (app) searchInputMouseUp(*app);
@@ -1697,6 +1531,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             if (app) cancelDocumentScrollbarDrag(*app, hwnd);
+            if (app) panelScrollbarEnd(*app, hwnd, true);
             if (app) sidePanelResizeEnd(*app, hwnd, true);
             break;
 
@@ -1721,6 +1556,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
 
         case WM_KEYDOWN:
+            if (app) touchStopFling(*app, hwnd);
             if (app) return handleKeyDown(*app, hwnd, wParam) ? 1 : 0;
             return 0;
 
@@ -1821,10 +1657,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (wParam == TIMER_SELECT_SCROLL && app) {
                 handleSelectScrollTimer(*app, hwnd);
             }
+            if (wParam == TIMER_TOUCH_HOLD && app) touchHold(*app, hwnd);
+            if (wParam == TIMER_TOUCH_FLING && app) touchFlingStep(*app, hwnd, touchClockMs());
             if (wParam == TIMER_IMAGE_REFLOW && app) {
                 // One relayout for however many images arrived since armed
                 KillTimer(hwnd, TIMER_IMAGE_REFLOW);
                 app->layoutDirty = true;
+                // The open print preview draws its own cached pages: lay
+                // them out again so the diagram appears and paginates as
+                // it will print
+                printPreviewRefresh(*app);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             if (wParam == TIMER_ZOOM_APPLY && app) {
@@ -2015,7 +1857,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 settings.keyOverrides = app->keyOverrides;
                 if (!app->currentFile.empty()) {
                     rememberReadingPosition(settings, app->currentFile,
-                                            app->scrollY, app->zoomFactor);
+                                            readingPlace(*app), app->zoomFactor);
                 }
 
                 // Get window placement for position/size/maximized state
@@ -2095,6 +1937,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     app.tabSearchEnabled = savedSettings.tabSearchEnabled;
     app.browserFocusPath = savedSettings.browserFocusPath;
     app.openInTabs = savedSettings.openInTabs;
+    app.keepDeletedTabs = savedSettings.keepDeletedTabs;
+    // Persisted when toggled and kept as on disk at exit, like openInTabs
+    app.showNotifications = savedSettings.showNotifications;
     app.editorAssists = savedSettings.editorAssists;
     app.showWordCount = savedSettings.showWordCount;
     app.printMarginMm = savedSettings.printMarginMm;

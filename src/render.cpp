@@ -140,6 +140,34 @@ static void addTextRun(App& app, LayoutInfo&& info, const D2D1_POINT_2F& pos,
     }
 }
 
+// Records docText[start, end) as bold, joining a range it continues
+static void markRange(std::vector<std::pair<size_t, size_t>>& ranges, size_t start, size_t end) {
+    if (start >= end) return;
+    if (!ranges.empty() && ranges.back().second >= start) {
+        ranges.back().second = std::max(ranges.back().second, end);
+    } else {
+        ranges.push_back({start, end});
+    }
+}
+
+// The styles a copy from the viewer carries (#285): bold, italic, and
+// links that lead somewhere outside the document. Anchors, wiki links and
+// file references would lead nowhere from a mail, so they paste as text.
+static void markStyles(App& app, const InlineStyle& style, bool isLink, const std::string& url,
+                       size_t start, size_t end) {
+    if (style.bold) markRange(app.docBoldRanges, start, end);
+    if (style.italic) markRange(app.docItalicRanges, start, end);
+    if (!isLink || start >= end ||
+        !(url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0 || url.rfind("mailto:", 0) == 0))
+        return;
+    auto& links = app.docLinkRanges;
+    if (!links.empty() && links.back().url == url && links.back().end >= start) {
+        links.back().end = std::max(links.back().end, end);
+    } else {
+        links.push_back({start, end, url});
+    }
+}
+
 struct LayoutSnapshot {
     size_t textRuns, rects, lines, shapes, connectors, bitmaps;
     size_t links, textRects, lineBuckets, docTextLen, tasks, anchors;
@@ -183,6 +211,13 @@ static void rollbackTo(App& app, const LayoutSnapshot& s) {
     app.textRects.resize(s.textRects);
     app.lineBuckets.resize(s.lineBuckets);
     app.docText.resize(s.docTextLen);
+    for (auto* ranges : {&app.docBoldRanges, &app.docItalicRanges}) {
+        while (!ranges->empty() && ranges->back().first >= s.docTextLen) ranges->pop_back();
+        if (!ranges->empty()) ranges->back().second = std::min(ranges->back().second, s.docTextLen);
+    }
+    auto& links = app.docLinkRanges;
+    while (!links.empty() && links.back().start >= s.docTextLen) links.pop_back();
+    if (!links.empty()) links.back().end = std::min(links.back().end, s.docTextLen);
     app.taskRects.resize(s.tasks);
     app.htmlAnchors.resize(s.anchors);  // a trial layout's anchors sit at trial positions
 }
@@ -605,10 +640,14 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                     y += lineHeight;
                 }
 
-                app.layoutRects.push_back({D2D1::RectF(x - 2, y + mathTextOffset,
-                                                      x + textWidth + kCodeSpanPadding,
-                                                      y + mathTextOffset + normalLineHeight),
-                                           app.theme.codeBackground});
+                // The span keeps its padding without a background (#278)
+                const D2D1_COLOR_F codeBox = themeInlineCodeBackground(app.theme);
+                if (codeBox.a > 0.0f) {
+                    app.layoutRects.push_back({D2D1::RectF(x - 2, y + mathTextOffset,
+                                                          x + textWidth + kCodeSpanPadding,
+                                                          y + mathTextOffset + normalLineHeight),
+                                               codeBox});
+                }
 
                 // The run's own baseline counts any fallback font it uses
                 float codeTop = drawYOffset + baselineOf(textFormat) -
@@ -619,6 +658,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                            codeDocStart, text.length(), true);
 
                 app.docText += text;
+                markStyles(app, run.style, isLink, linkUrl, codeDocStart, app.docText.size());
                 if (isLink) addLinkSegment(x, x + textWidth, y, linkUrl, color);
                 if (hasUnderline) {
                     addUnderline(run.style, x, x + textWidth, y, y + drawYOffset + baselineOf(textFormat),
@@ -875,10 +915,13 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
             }
             float segWidth = widthOf(segStart, segEnd);
             if (wrappedCode) {
-                app.layoutRects.push_back({
-                    D2D1::RectF(segX - 2, y + mathTextOffset, segX + segWidth + kCodeSpanPadding,
-                                y + mathTextOffset + normalLineHeight),
-                    app.theme.codeBackground});
+                const D2D1_COLOR_F codeBox = themeInlineCodeBackground(app.theme);
+                if (codeBox.a > 0.0f) {
+                    app.layoutRects.push_back({
+                        D2D1::RectF(segX - 2, y + mathTextOffset, segX + segWidth + kCodeSpanPadding,
+                                    y + mathTextOffset + normalLineHeight),
+                        codeBox});
+                }
             } else if (hasBg) {
                 app.layoutRects.push_back({
                     D2D1::RectF(segX - 2, y + mathTextOffset + 1, segX + segWidth + 2,
@@ -1006,6 +1049,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         if (measureInfo.layout) measureInfo.layout->Release();
 
         app.docText += text;
+        markStyles(app, run.style, isLink, linkUrl, textDocStart, app.docText.size());
 
         if (isLink && lastWordEndX > linkLineStartX) {
             addLinkSegment(linkLineStartX, lastWordEndX, linkLineY, linkUrl, color);
@@ -1240,11 +1284,16 @@ static App::LayoutShapeType mermaidShapeType(mermaid::NodeShape shape) {
             return App::LayoutShapeType::Ellipse;
         case mermaid::NodeShape::Hexagon:
             return App::LayoutShapeType::Hexagon;
+        case mermaid::NodeShape::Asymmetric:  // a Path once its outline is built
         case mermaid::NodeShape::Rectangle:
         default:
             return App::LayoutShapeType::Rectangle;
     }
 }
+
+static ID2D1PathGeometry* buildPolygonGeometry(
+        App& app, const std::vector<mermaidext::Point>& points,
+        float originX, float originY);
 
 static bool layoutMermaidDiagram(App& app, const std::string& source,
                                  size_t sourceOffset, float& y,
@@ -1288,6 +1337,7 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
             width = diameter;
             height = diameter;
         }
+        width += mermaid::leftNotch(node.shape, height);
 
         labels.push_back(std::move(label));
         nodeSizes.push_back({width, height});
@@ -1310,14 +1360,30 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
 
         auto& edgeLabel = edgeLabels[i];
         edgeLabel.text = toWide(diagram.edges[i].label);
+        // A pixel of slack: laid out again at exactly its measured width, a
+        // label could wrap its last letter onto a line of its own (#281)
         edgeLabel.width = std::min(
             180.0f * scale,
             std::max(60.0f * scale,
-                     measureText(app, edgeLabel.text, app.textFormat) +
+                     std::ceil(measureText(app, edgeLabel.text, app.textFormat)) + 1.0f +
                          labelPaddingX * 2.0f));
         LayoutInfo measured = createWrappedLayout(
             app, edgeLabel.text, app.textFormat,
             edgeLabel.width - labelPaddingX * 2.0f, measureHeight);
+        // A word longer than the cap widens the label, up to twice the
+        // cap, rather than break in the middle
+        FLOAT wordWidth = 0.0f;
+        if (measured.layout && SUCCEEDED(measured.layout->DetermineMinWidth(&wordWidth))) {
+            const float needed = std::min(
+                360.0f * scale, std::ceil(wordWidth) + 1.0f + labelPaddingX * 2.0f);
+            if (needed > edgeLabel.width) {
+                edgeLabel.width = needed;
+                measured.layout->Release();
+                measured = createWrappedLayout(
+                    app, edgeLabel.text, app.textFormat,
+                    edgeLabel.width - labelPaddingX * 2.0f, measureHeight);
+            }
+        }
         edgeLabel.height = std::max(
             28.0f * scale, measured.height + labelPaddingY * 2.0f);
         if (measured.layout) measured.layout->Release();
@@ -1431,6 +1497,12 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
 
     app.layoutConnectors.reserve(
         app.layoutConnectors.size() + diagram.edges.size());
+    // A node's left side at mid-height, where a notch has its tip
+    auto leftSide = [&](size_t node) {
+        const auto& rect = nodeRects[node];
+        return rect.left + mermaid::leftNotch(diagram.nodes[node].shape,
+                                              rect.bottom - rect.top);
+    };
     size_t exteriorLane = 0;
     std::vector<D2D1_RECT_F> placedLabelRects;
     placedLabelRects.reserve(diagram.edges.size());
@@ -1528,9 +1600,9 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
                 };
             } else if (forward) {
                 D2D1_POINT_2F start = D2D1::Point2F(
-                    leftToRight ? from.right : from.left, fromCenterY);
+                    leftToRight ? from.right : leftSide(edge.from), fromCenterY);
                 D2D1_POINT_2F end = D2D1::Point2F(
-                    leftToRight ? to.left : to.right, toCenterY);
+                    leftToRight ? leftSide(edge.to) : to.right, toCenterY);
                 float middleX = (start.x + end.x) * 0.5f;
                 connector.points = {
                     start,
@@ -1644,15 +1716,27 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
         const auto& node = diagram.nodes[i];
         const auto& rect = nodeRects[i];
         const auto& style = styles[i];
+        const float notch = mermaid::leftNotch(node.shape, rect.bottom - rect.top);
 
-        app.layoutShapes.push_back({
+        App::LayoutShape shape = {
             mermaidShapeType(node.shape),
             rect,
             style.fill,
             style.stroke,
             style.strokeWidth,
             8.0f * scale,
-        });
+        };
+        if (notch > 0.0f) {
+            // Built once in the shape's own space, so the screen and print
+            // draw the same outline
+            float w = rect.right - rect.left;
+            float h = rect.bottom - rect.top;
+            shape.geometry = buildPolygonGeometry(
+                app, {{0.0f, 0.0f}, {w, 0.0f}, {w, h}, {0.0f, h}, {notch, h * 0.5f}},
+                0.0f, 0.0f);
+            if (shape.geometry) shape.type = App::LayoutShapeType::Path;
+        }
+        app.layoutShapes.push_back(shape);
 
         float insetX = paddingX;
         float insetY = paddingY;
@@ -1664,7 +1748,7 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
         }
 
         D2D1_RECT_F textRect = D2D1::RectF(
-            rect.left + insetX,
+            rect.left + notch + insetX,
             rect.top + insetY,
             rect.right - insetX,
             rect.bottom - insetY);
@@ -1688,15 +1772,17 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
             return left.rect.left < right.rect.left;
         });
     for (const auto& item : textItems) {
+        // A pixel of slack, centred: a label boxed at its measured width and
+        // laid out again at exactly that width could wrap its last word
         LayoutInfo textLayout = createWrappedLayout(
             app, item.text, app.textFormat,
-            item.rect.right - item.rect.left,
+            item.rect.right - item.rect.left + 1.0f,
             item.rect.bottom - item.rect.top);
         size_t docStart = app.docText.size();
         app.docText += item.text;
         addTextRun(
             app, std::move(textLayout),
-            D2D1::Point2F(item.rect.left, item.rect.top),
+            D2D1::Point2F(item.rect.left - 0.5f, item.rect.top),
             item.rect, item.color, docStart, item.text.size(), true);
         app.docText += L"\n";
     }
@@ -2320,6 +2406,10 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
                 const uint64_t key = plantuml::cacheKey(
                     code, preambleText, toolPath,
                     plantuml::toolStampFor(toolPath), 0 /*png*/);
+                // The fit ordinal is taken whether or not the image has
+                // arrived yet: a diagram still rendering must not shift
+                // the fit state of the diagrams after it
+                const unsigned fitKey = 0x80000000u | app.layoutDiagramSeq++;
                 // Adopt finished renders on this (owner) thread before
                 // deciding: a relayout may run before the posted
                 // WM_APP_PLANTUML_READY is dispatched, and drainFinished()
@@ -2338,8 +2428,6 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
                     auto& image = getOrLoadImage(app, wideToUtf8(pngPath));
                     if (image.failed || !image.bitmap) return false;
                     const float scale = app.contentScale * app.zoomFactor;
-                    const unsigned fitKey =
-                        0x80000000u | app.layoutDiagramSeq++;
                     const bool fitActive = fitBlockEnabled(app, fitKey);
                     const float renderedW = (float)image.width * scale;
                     const float renderedH = (float)image.height * scale;

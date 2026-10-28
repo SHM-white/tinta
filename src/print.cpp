@@ -30,14 +30,6 @@
 // "Microsoft Print to PDF" and the OS produces the PDF, with font
 // embedding (including CJK) handled by the driver.
 
-namespace {
-
-// Page margins on every side (#257): the preview's choice, kept in
-// settings.ini, 0.75 in unless changed
-float printMarginDips(const App& app) {
-    return app.printMarginMm * 96.0f / 25.4f;
-}
-
 // Paper-derived palette with a true white page, set in the screen theme's
 // own body, heading and code faces (#258)
 D2DTheme printTheme(const D2DTheme& screen) {
@@ -47,7 +39,18 @@ D2DTheme printTheme(const D2DTheme& screen) {
     t.codeFontFamily = screen.codeFontFamily;
     t.background = D2D1::ColorF(1.0f, 1.0f, 1.0f);
     t.codeBackground = hexColor(0xF4F4F4);
+    // Inline code without a box stays without one on paper (#278)
+    if (screen.inlineCodeBackground && screen.inlineCodeBackground->a <= 0.0f)
+        t.inlineCodeBackground = screen.inlineCodeBackground;
     return t;
+}
+
+namespace {
+
+// Page margins on every side (#257): the preview's choice, kept in
+// settings.ini, 0.75 in unless changed
+float printMarginDips(const App& app) {
+    return app.printMarginMm * 96.0f / 25.4f;
 }
 
 using SavedView = App::PrintSavedView;
@@ -537,7 +540,8 @@ int renderPages(App& app, const PageGeometry& geo, EmitFn emitPage) {
     // PlantUML queue can never deliver here, so the print layout is the
     // single place allowed to render a missing diagram inline, bounded by
     // one shared millisecond budget. The print preview and the link peek
-    // share layoutAtPrintWidth but stay async (they run with a pump).
+    // share layoutAtPrintWidth but stay async (they run with a pump); the
+    // reflow timer refreshes an open preview when a render lands.
     app.plantumlPrintLayout = true;
     app.plantumlPrintBudgetMsLeft = 30000;
     layoutAtPrintWidth(app, geo.contentW);
@@ -751,6 +755,12 @@ void printPreviewSetFormat(App& app, int paper, bool landscape) {
     if (paper == app.printPreviewPaper && landscape == app.printPreviewLandscape) return;
     app.printPreviewPaper = paper;
     app.printPreviewLandscape = landscape;
+    refreshPreviewLayout(app);
+    if (app.hwnd) InvalidateRect(app.hwnd, nullptr, FALSE);
+}
+
+void printPreviewRefresh(App& app) {
+    if (!app.showPrintPreview) return;
     refreshPreviewLayout(app);
     if (app.hwnd) InvalidateRect(app.hwnd, nullptr, FALSE);
 }
