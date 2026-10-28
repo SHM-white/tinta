@@ -1163,10 +1163,7 @@ static const ElementPtr* soleMathDisplayChild(const ElementPtr& elem) {
     return found;
 }
 
-// Inline content of nothing but empty anchors (<a id="x"></a> on its own
-// line above a heading) only marks link targets. Like a browser's empty
-// paragraph it takes no room; the targets pin to where it would start (#255).
-static bool pinAnchorsOnly(App& app, const std::vector<ElementPtr>& children, float y) {
+static bool isAnchorOnlyContent(const std::vector<ElementPtr>& children) {
     bool anchor = false;
     for (const auto& child : children) {
         if (!child) continue;
@@ -1180,7 +1177,14 @@ static bool pinAnchorsOnly(App& app, const std::vector<ElementPtr>& children, fl
             return false;
         }
     }
-    if (!anchor) return false;
+    return anchor;
+}
+
+// Inline content of nothing but empty anchors (<a id="x"></a> on its own
+// line above a heading) only marks link targets. Like a browser's empty
+// paragraph it takes no room; the targets pin to where it would start (#255).
+static bool pinAnchorsOnly(App& app, const std::vector<ElementPtr>& children, float y) {
+    if (!isAnchorOnlyContent(children)) return false;
     for (const auto& child : children) {
         if (child && child->type == ElementType::Anchor) {
             app.htmlAnchors.push_back({child->title, y});
@@ -2795,6 +2799,26 @@ static bool isListInlineElement(ElementType type) {
     }
 }
 
+// HTML wrappers and anchor-only content do not determine a list marker's baseline.
+static const Element* firstListContent(const std::vector<ElementPtr>& children) {
+    for (size_t i = 0; i < children.size();) {
+        const auto& child = children[i];
+        if (isListInlineElement(child->type)) {
+            std::vector<ElementPtr> inlineElements;
+            do {
+                inlineElements.push_back(children[i++]);
+            } while (i < children.size() && isListInlineElement(children[i]->type));
+            if (!isAnchorOnlyContent(inlineElements)) return inlineElements.front().get();
+        } else {
+            ++i;
+            if (child->type == ElementType::Paragraph && isAnchorOnlyContent(child->children)) continue;
+            if (child->type != ElementType::HtmlBlock) return child.get();
+            if (const auto* first = firstListContent(child->children)) return first;
+        }
+    }
+    return nullptr;
+}
+
 static void layoutList(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     float scale = app.contentScale * app.zoomFactor;
     float listIndent = 24.0f * scale;
@@ -2870,27 +2894,30 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
                 inlineElements.push_back(itemChild);
             } else {
                 if (!inlineElements.empty()) {
-                    layoutInlineContent(app, inlineElements, indent + listIndent, y,
-                        maxWidth - listIndent, app.textFormat, app.theme.text);
+                    if (!pinAnchorsOnly(app, inlineElements, y)) {
+                        layoutInlineContent(app, inlineElements, indent + listIndent, y,
+                            maxWidth - listIndent, app.textFormat, app.theme.text);
+                        // The item's text ends its line before a nested list, as
+                        // on screen (a copy read "Water it.morning")
+                        app.docText += L"\n";
+                    }
                     inlineElements.clear();
-                    // The item's text ends its line before a nested list, as
-                    // on screen (a copy read "Water it.morning")
-                    app.docText += L"\n";
                 }
                 layoutElement(app, itemChild, y, indent + listIndent, maxWidth - listIndent);
             }
         }
-        if (!inlineElements.empty()) {
+        if (!inlineElements.empty() && !pinAnchorsOnly(app, inlineElements, y)) {
             layoutInlineContent(app, inlineElements, indent + listIndent, y,
                 maxWidth - listIndent, app.textFormat, app.theme.text);
         }
 
+        const auto* first = firstListContent(child->children);
         if (markerIndex < app.layoutTextRuns.size() && headingStart < app.headings.size() &&
-            !child->children.empty() && child->children.front()->type == ElementType::Heading) {
+            first && first->type == ElementType::Heading) {
             // Move only the marker: keep heading margins and align to the main
             // text baseline, even when the heading starts with a raised script.
             auto& marker = app.layoutTextRuns[markerIndex];
-            auto format = app.headingFormats[child->children.front()->level - 1];
+            auto format = app.headingFormats[first->level - 1];
             float headingBaseline = app.headings[headingStart].y + formatBaseline(app, format ? format : app.textFormat);
             float shift = headingBaseline - marker.pos.y - layoutBaseline(marker.layout);
             marker.pos.y += shift;

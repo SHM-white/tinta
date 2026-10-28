@@ -137,6 +137,13 @@ void parserTests(App& app) {
            "HtmlBlock[List[ListItem['a' List[ListItem['b'] ListItem['c']]] ListItem['d']]]");
     expect(app, "<ul><li>a</li><li>b</li></ul>\n",
            "HtmlBlock[List[ListItem['a'] ListItem['b']]]");
+    // Markdown list HTML has an extra wrapper; raw HTML list children do not.
+    expect(app, "- <h3>Title</h3>\n", "List[ListItem[HtmlBlock[Heading['Title']]]]");
+    expect(app, "1. <h3>Title</h3>\n", "List[ListItem[HtmlBlock[Heading['Title']]]]");
+    expect(app, "<ul><li><a id=\"target\"></a><h3>Title</h3></li></ul>\n",
+           "HtmlBlock[List[ListItem[Anchor Heading['Title']]]]");
+    expect(app, "<ol><li><a id=\"target\"></a><h3>Title</h3></li></ol>\n",
+           "HtmlBlock[List[ListItem[Anchor Heading['Title']]]]");
     // Inside <pre> and <code> the tags go and the text stays
     expect(app, "<p><code>H<sub>2</sub>O</code> and text</p>\n",
            "HtmlBlock[Paragraph[Code['H2O'] ' and text']]");

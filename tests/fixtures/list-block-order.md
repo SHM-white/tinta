@@ -77,3 +77,15 @@ surrounding code
 ```
 
 Final surrounding paragraph.
+
+## HTML wrappers and empty anchors
+
+[Jump to the anchored heading](#list-heading-target) or [the following target](#list-heading-tail).
+
+- <h3>Wrapped HTML heading with enough words to wrap at a narrow width while keeping its bullet aligned with the heading text</h3>
+
+<ol><li><h3>Unanchored HTML heading</h3></li></ol>
+
+<ol><li><a id="list-heading-target"></a><h3>Anchored HTML heading</h3><a id="list-heading-tail"></a></li></ol>
+
+After the HTML wrapper and anchor examples.

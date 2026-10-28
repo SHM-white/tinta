@@ -97,7 +97,9 @@ void checkFixture(const App& app) {
         L"Ordered level six heading", L"Following the ordered headings.", L"Unordered heading first",
         L"Paragraph-first unordered control.", L"Unordered level one heading", L"Unordered level six heading",
         L"Following the unordered headings.", L"Surrounding quote",
-        L"surrounding code", L"Final surrounding paragraph"});
+        L"surrounding code", L"Final surrounding paragraph", L"HTML wrappers and empty anchors",
+        L"Wrapped HTML heading", L"Unanchored HTML heading", L"Anchored HTML heading",
+        L"After the HTML wrapper and anchor examples."});
     checkTable(app);
     const float scale = app.contentScale * app.zoomFactor;
     const auto* before = runFor(app, L"Before table paragraph");
@@ -133,7 +135,7 @@ void checkFixture(const App& app) {
                      closeEnough(rect.rect.right - rect.rect.left, 4) &&
                      rect.rect.top <= quote->bounds.top && rect.rect.bottom >= quote->bounds.bottom;
           }), "list-contained quote retains its inset and bar");
-    check(app.codeBlocks.size() == 2 && app.headings.size() == 11, "mixed headings and fences keep block layout");
+    check(app.codeBlocks.size() == 2 && app.headings.size() == 15, "mixed headings and fences keep block layout");
     const auto* ruleBefore = runFor(app, L"After heading paragraph");
     const auto* ruleAfter = runFor(app, L"After rule paragraph");
     check(ruleBefore && ruleAfter && std::any_of(app.layoutLines.begin(), app.layoutLines.end(), [&](const auto& line) {
@@ -243,6 +245,115 @@ void firstBlockCases(App& app) {
     }
 }
 
+void htmlHeadingCases(App& app) {
+    const float scale = app.contentScale * app.zoomFactor;
+    for (const std::string prefix : {"- ", "1. ", "<ul>", "<ol>"}) {
+        const bool raw = prefix[0] == '<';
+        for (int level : {1, 3, 6}) {
+            const std::string tag = "h" + std::to_string(level);
+            const std::string heading = "<" + tag + ">" + (level == 6 ? "<sup>up</sup> " : "") +
+                "HTML title with enough words to wrap across lines at narrow widths while retaining native heading formatting</" + tag + ">";
+            std::vector<float> plain;
+            for (bool anchored : {false, true}) {
+                if (anchored && !raw) continue;
+                const std::string anchors = anchored ? "<a id=\"first\"></a> <a id=\"second\"></a>" : "";
+                const std::string tail = anchored ? "<a id=\"tail\"></a>" : "";
+                const std::string source = raw ? prefix + "<li>" + anchors + heading + tail + "</li></" +
+                    prefix.substr(1, 2) + ">\n<p>Following HTML paragraph.</p>\n" :
+                    prefix + heading + "\n\nFollowing HTML paragraph.\n";
+                auto parsed = app.parser.parse(source);
+                check(parsed.success, "HTML heading list parses with default flags");
+                app.root = parsed.root;
+                layoutDocument(app);
+                const auto* title = runFor(app, L"HTML title");
+                const auto* following = runFor(app, L"Following HTML paragraph.");
+                check(title && following && app.headings.size() == 1 && !app.layoutTextRuns.empty(),
+                      "HTML list retains a native heading, marker and following paragraph");
+                if (!title || !following || app.headings.empty() || app.layoutTextRuns.empty()) continue;
+                const auto& marker = app.layoutTextRuns.front();
+                check(!marker.docLength && closeEnough(baseline(marker), baseline(*title)),
+                      "HTML first heading shares its main text baseline with the marker");
+                float size = 0;
+                title->layout->GetFontSize(0, &size);
+                check(closeEnough(size, app.headingFormats[level - 1]->GetFontSize()),
+                      "HTML first heading keeps native font size");
+                const std::vector<float> geometry = {title->pos.x, title->pos.y, following->pos.y,
+                    app.contentHeight, marker.pos.y};
+                if (!anchored) plain = geometry;
+                else {
+                    for (size_t i = 0; i < plain.size(); ++i)
+                        check(closeEnough(plain[i], geometry[i]), "empty list anchors preserve heading, marker and following layout");
+                    for (const char* id : {"first", "second", "tail"}) {
+                        check(std::count_if(app.htmlAnchors.begin(), app.htmlAnchors.end(), [&](const auto& a) {
+                            return a.first == id;
+                        }) == 1, "each list anchor is registered exactly once");
+                    }
+                    for (const auto& anchor : app.htmlAnchors) {
+                        const float expected = anchor.first == "tail" ? following->pos.y - 8 * scale :
+                            app.headings[0].y - (level == 1 ? 16 : 20) * scale;
+                        check(closeEnough(anchor.second, expected), "empty list anchors pin to their flow position");
+                    }
+                }
+            }
+        }
+    }
+}
+
+void anchorBufferCases(App& app) {
+    app.root = app.parser.parse("- Control\n").root;
+    layoutDocument(app);
+    const float markerY = app.layoutTextRuns.front().pos.y;
+    for (int kind = 0; kind < 7; ++kind) {
+        auto heading = node(ElementType::Heading, {text("Later heading")});
+        heading->level = 3;
+        auto anchor = node(ElementType::Anchor);
+        anchor->title = "buffer";
+        std::vector<ElementPtr> children;
+        switch (kind) {
+            case 0: children = {anchor, text("Visible before"), heading}; break;
+            case 1: children = {node(ElementType::Anchor, {text("Visible anchor")}), heading}; break;
+            case 2: children = {anchor, node(ElementType::HardBreak), heading}; break;
+            case 3: children = {node(ElementType::HorizontalRule), heading}; break;
+            case 4: children = {node(ElementType::BlockQuote, {heading})}; break;
+            case 5: children = {node(ElementType::List, {node(ElementType::ListItem, {heading})})}; break;
+            case 6: children = {anchor}; break;
+        }
+        app.root = node(ElementType::Document, {node(ElementType::List, {node(ElementType::ListItem, children)})});
+        layoutDocument(app);
+        check(!app.layoutTextRuns.empty() && closeEnough(app.layoutTextRuns.front().pos.y, markerY),
+              "later, nested and absent headings do not move the outer marker");
+        if (kind < 2) {
+            const auto* visible = runFor(app, kind == 0 ? L"Visible before" : L"Visible anchor");
+            check(visible && closeEnough(visible->pos.y, markerY), "visible anchor buffers retain their text line");
+        }
+        if (kind == 2) {
+            check(!app.headings.empty() && app.headings[0].y > markerY + 20 * app.contentScale * app.zoomFactor,
+                  "an explicit hard break still allocates a line");
+        }
+        if (kind == 6) {
+            const float height = app.contentHeight;
+            check(app.htmlAnchors.size() == 1, "anchor-only item registers its target");
+            app.root = node(ElementType::Document, {node(ElementType::List, {node(ElementType::ListItem)})});
+            layoutDocument(app);
+            check(closeEnough(height, app.contentHeight), "anchor-only item keeps the ordinary empty-item minimum spacing");
+        }
+    }
+    // Nested wrappers and anchor-only paragraphs are transparent to a first heading.
+    auto heading = node(ElementType::Heading, {text("Wrapped heading")});
+    heading->level = 3;
+    auto anchor = node(ElementType::Anchor);
+    anchor->title = "wrapped";
+    app.root = node(ElementType::Document, {node(ElementType::List, {node(ElementType::ListItem, {
+        node(ElementType::Paragraph, {anchor, text(" \t"), node(ElementType::SoftBreak)}),
+        node(ElementType::HtmlBlock, {node(ElementType::HtmlBlock, {heading})})})})});
+    layoutDocument(app);
+    const auto* title = runFor(app, L"Wrapped heading");
+    check(title && closeEnough(baseline(app.layoutTextRuns.front()), baseline(*title)),
+          "first heading resolves through nested HTML wrappers and an anchor-only paragraph");
+    check(app.htmlAnchors.size() == 1 && closeEnough(app.htmlAnchors[0].second, markerY),
+          "anchor-only paragraph pins once without advancing the heading");
+}
+
 void ordinaryCases(App& app) {
     const float scale = app.contentScale * app.zoomFactor;
     for (bool loose : {false, true}) {
@@ -298,6 +409,8 @@ int main() {
                     syntheticCases(app);
                     ordinaryCases(app);
                     firstBlockCases(app);
+                    htmlHeadingCases(app);
+                    anchorBufferCases(app);
                 }
             }
         }
