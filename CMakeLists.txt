@@ -284,6 +284,7 @@ if(BUILD_TESTING)
         -DTEST_BINARY=$<TARGET_FILE:input_tests>
         -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/split-scrollbar-test-$<CONFIG>
         -DTEST_DOC=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/split-scrollbars-280.md
+        -DTEST_DOC2=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/editor-scrollbar-291.md
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_split_scrollbar_tests.cmake)
     add_test(NAME touch_gestures COMMAND ${CMAKE_COMMAND}
         -DTEST_BINARY=$<TARGET_FILE:input_tests>

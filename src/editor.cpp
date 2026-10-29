@@ -15,6 +15,7 @@
 #include "print.h"
 #include "i18n.h"
 #include "input.h"
+#include "sidepanels.h"
 
 #include "export.h"
 
@@ -352,6 +353,13 @@ void editorFollowPreview(App& app) {
     if (span > 0.0f && bytes > 0.0 && y > anchors[lo].renderedY) {
         offset += std::min(1.0f, (y - anchors[lo].renderedY) / span) * bytes;
     }
+    // Above the first block the page's top leads back to the source's
+    // first line, as the sync maps that stretch (#291)
+    const float top = documentContentTop(app);
+    if (y < anchors[0].renderedY && anchors[0].renderedY > top) {
+        offset = std::clamp((y - top) / (anchors[0].renderedY - top), 0.0f, 1.0f) *
+                 (double)anchors[0].sourceOffset;
+    }
     const auto next = std::upper_bound(app.editorLineByteOffsets.begin(),
                                        app.editorLineByteOffsets.end(), (size_t)offset);
     size_t line = next == app.editorLineByteOffsets.begin()
@@ -393,7 +401,15 @@ void syncPreviewToEditor(App& app) {
 
         // Interpolate between anchor[lo] and anchor[lo+1]
         float targetY;
-        if (lo + 1 < app.scrollAnchors.size() &&
+        if (topByteOffset < app.scrollAnchors[0].sourceOffset) {
+            // Above the first block (front matter, a heading's marker): from
+            // the page's top to that block. The offsets' difference, being
+            // unsigned, wrapped here and sent the preview on to the next
+            // block (#291)
+            const float top = documentContentTop(app);
+            const float t = (float)topByteOffset / (float)app.scrollAnchors[0].sourceOffset;
+            targetY = top + t * (app.scrollAnchors[0].renderedY - top);
+        } else if (lo + 1 < app.scrollAnchors.size() &&
             app.scrollAnchors[lo + 1].sourceOffset > app.scrollAnchors[lo].sourceOffset) {
             float t = (float)(topByteOffset - app.scrollAnchors[lo].sourceOffset) /
                       (float)(app.scrollAnchors[lo + 1].sourceOffset - app.scrollAnchors[lo].sourceOffset);
@@ -3652,11 +3668,12 @@ static size_t editorPosFromClick(App& app, int x, int y) {
     return lineStart + col;
 }
 
-// The band the editor's scrollbar takes presses in, at the pane's right edge
-static bool overEditorScrollbar(const App& app, float x) {
+// The band the editor's scrollbar takes presses in, at the pane's right
+// edge below the tab strip
+static bool overEditorScrollbar(const App& app, float x, float y) {
     const float editorWidth = editorPaneWidth(app);
     return app.editorContentHeight > app.height && x >= editorWidth - dpi(app, 14.0f) &&
-           x <= editorWidth - dpi(app, 2.0f);
+           x <= editorWidth - dpi(app, 2.0f) && y >= chromeTopHeight(app);
 }
 
 void handleEditorMouseDown(App& app, HWND hwnd, int x, int y) {
@@ -3671,17 +3688,12 @@ void handleEditorMouseDown(App& app, HWND hwnd, int x, int y) {
     // Editor scrollbar: a track click jumps, and the drag follows (#121).
     // Checked before the separator, whose grab zone overlaps the thumb —
     // the thin scrollbar is the more deliberate target
-    if (overEditorScrollbar(app, (float)x)) {
-        float maxScroll = app.editorContentHeight - app.height;
-        float sbHeight = (float)app.height / app.editorContentHeight * app.height;
-        sbHeight = std::max(sbHeight, dpi(app, 30.0f));
-        float track = std::max(1.0f, app.height - sbHeight);
-        float sbY = app.editorScrollY / maxScroll * track;
-        if ((float)y < sbY || (float)y > sbY + sbHeight) {
+    if (overEditorScrollbar(app, (float)x, (float)y)) {
+        // The track as drawn, below the tab strip (#291)
+        const ScrollbarGeometry bar = editorScrollbarV(app);
+        if ((float)y < bar.thumbStart || (float)y > bar.thumbStart + bar.thumbLength) {
             // Track click: center the thumb on the click point
-            float t = ((float)y - sbHeight * 0.5f) / track;
-            app.editorScrollY =
-                std::max(0.0f, std::min(maxScroll, t * maxScroll));
+            app.editorScrollY = bar.scrollForThumb((float)y - bar.thumbLength * 0.5f);
         }
         app.editorScrollbarDragging = true;
         app.editorScrollbarDragStartY = (float)y;
@@ -3846,16 +3858,13 @@ void handleEditorMouseMove(App& app, HWND hwnd, int x, int y) {
     if (app.editorScrollbarDragging) {
         // The pointer stays an arrow for the whole drag, over the text too (#280)
         SetCursor(LoadCursor(nullptr, IDC_ARROW));
-        float maxScroll = std::max(0.0f, app.editorContentHeight - app.height);
-        float sbHeight = (float)app.height /
-                         std::max(1.0f, app.editorContentHeight) * app.height;
-        sbHeight = std::max(sbHeight, dpi(app, 30.0f));
-        float track = std::max(1.0f, app.height - sbHeight);
-        float delta =
-            ((float)y - app.editorScrollbarDragStartY) / track * maxScroll;
-        app.editorScrollY = std::max(
-            0.0f,
-            std::min(maxScroll, app.editorScrollbarDragStartScroll + delta));
+        // The thumb moves with the pointer along the track as drawn (#291)
+        const ScrollbarGeometry bar = editorScrollbarV(app);
+        const float travel = bar.trackLength - bar.thumbLength;
+        if (bar.maxScroll > 0 && travel > 0) {
+            const float delta = ((float)y - app.editorScrollbarDragStartY) / travel * bar.maxScroll;
+            app.editorScrollY = std::clamp(app.editorScrollbarDragStartScroll + delta, 0.0f, bar.maxScroll);
+        }
         InvalidateRect(hwnd, nullptr, FALSE);
         return;
     }
@@ -3896,7 +3905,7 @@ void handleEditorMouseMove(App& app, HWND hwnd, int x, int y) {
         (float)x < editorWidth + editSeamWidth(app)) {
         SetCursor(cursorSizeWE);
         return;
-    } else if (overEditorScrollbar(app, (float)x)) {
+    } else if (overEditorScrollbar(app, (float)x, (float)y)) {
         SetCursor(cursorArrow);  // a control, not text (#280)
         return;
     } else if (x < editorWidth) {
@@ -4019,6 +4028,19 @@ static void editorDrawExtraCarets(App& app, float lineHeight) {
             D2D1::RectF(point.x, point.y, point.x + dpi(app, 2.0f), point.y + lineHeight),
             app.brush);
     }
+}
+
+// The thumb at the editor pane's right edge, on the track below the tab
+// strip: drawn from the window's top, it went under the strip (#291)
+static void renderEditorScrollbar(App& app, float editorWidth) {
+    if (app.editorContentHeight <= app.height) return;
+    const ScrollbarGeometry bar = editorScrollbarV(app);
+    float sbColorValue = app.theme.isDark ? 1.0f : 0.0f;
+    app.brush->SetColor(D2D1::ColorF(sbColorValue, sbColorValue, sbColorValue, 0.3f));
+    app.renderTarget->FillRoundedRectangle(
+        D2D1::RoundedRect(D2D1::RectF(editorWidth - dpi(app, 10.0f), bar.thumbStart,
+                                       editorWidth - dpi(app, 4.0f), bar.thumbStart + bar.thumbLength), 3, 3),
+        app.brush);
 }
 
 // Soft-wrap rendering: each logical line spans editorRowStarts-many visual
@@ -4145,20 +4167,7 @@ static void renderEditorWrapped(App& app, float editorWidth) {
                               app.editorTotalRows * lineHeight +
                               editorBottomClearance(app, lineHeight);
 
-    // Editor scrollbar (same as unwrapped)
-    if (app.editorContentHeight > app.height) {
-        float maxScroll = app.editorContentHeight - app.height;
-        float sbHeight = (float)app.height / app.editorContentHeight * app.height;
-        sbHeight = std::max(sbHeight, dpi(app, 30.0f));
-        float sbY = (maxScroll > 0) ? (app.editorScrollY / maxScroll * (app.height - sbHeight)) : 0;
-
-        float sbColorValue = app.theme.isDark ? 1.0f : 0.0f;
-        app.brush->SetColor(D2D1::ColorF(sbColorValue, sbColorValue, sbColorValue, 0.3f));
-        app.renderTarget->FillRoundedRectangle(
-            D2D1::RoundedRect(D2D1::RectF(editorWidth - dpi(app, 10.0f), sbY,
-                                           editorWidth - dpi(app, 4.0f), sbY + sbHeight), 3, 3),
-            app.brush);
-    }
+    renderEditorScrollbar(app, editorWidth);
 
     app.renderTarget->PopAxisAlignedClip();
 }
@@ -4336,20 +4345,7 @@ void renderEditor(App& app, float editorWidth) {
                               app.editorLineStarts.size() * lineHeight +
                               editorBottomClearance(app, lineHeight);
 
-    // Editor scrollbar
-    if (app.editorContentHeight > app.height) {
-        float maxScroll = app.editorContentHeight - app.height;
-        float sbHeight = (float)app.height / app.editorContentHeight * app.height;
-        sbHeight = std::max(sbHeight, dpi(app, 30.0f));
-        float sbY = (maxScroll > 0) ? (app.editorScrollY / maxScroll * (app.height - sbHeight)) : 0;
-
-        float sbColorValue = app.theme.isDark ? 1.0f : 0.0f;
-        app.brush->SetColor(D2D1::ColorF(sbColorValue, sbColorValue, sbColorValue, 0.3f));
-        app.renderTarget->FillRoundedRectangle(
-            D2D1::RoundedRect(D2D1::RectF(editorWidth - dpi(app, 10.0f), sbY,
-                                           editorWidth - dpi(app, 4.0f), sbY + sbHeight), 3, 3),
-            app.brush);
-    }
+    renderEditorScrollbar(app, editorWidth);
 
     app.renderTarget->PopAxisAlignedClip();
 }

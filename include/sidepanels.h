@@ -26,6 +26,9 @@ struct ScrollbarGeometry {
 // down to the horizontal one, which runs along the viewport's bottom
 ScrollbarGeometry documentScrollbarV(const App& app);
 ScrollbarGeometry documentScrollbarH(const App& app);
+// The editor's bar at its pane's right edge, on a track like the
+// document's: from below the tab strip to the window's foot (#291)
+ScrollbarGeometry editorScrollbarV(const App& app);
 
 // A side panel's list and the thin bar at the card's right edge, once the
 // list outgrows its room. The bar drags and takes track clicks like the

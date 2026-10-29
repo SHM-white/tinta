@@ -242,6 +242,20 @@ ScrollbarGeometry documentScrollbarH(const App& app) {
     return bar;
 }
 
+ScrollbarGeometry editorScrollbarV(const App& app) {
+    ScrollbarGeometry bar;
+    const float height = static_cast<float>(app.height);
+    const float extent = std::max(height, app.editorContentHeight);
+    bar.maxScroll = std::max(0.0f, extent - height);
+    bar.trackStart = chromeTopHeight(app);
+    bar.trackLength = std::max(0.0f, height - bar.trackStart);
+    bar.thumbLength = std::max(extent > 0 ? bar.trackLength / extent * bar.trackLength : 0.0f, dpi(app, 30.0f));
+    bar.thumbStart = bar.trackStart;
+    if (bar.maxScroll > 0)
+        bar.thumbStart += std::clamp(app.editorScrollY / bar.maxScroll, 0.0f, 1.0f) * (bar.trackLength - bar.thumbLength);
+    return bar;
+}
+
 bool panelListView(const App& app, PanelList which, PanelListView& out) {
     if (!panelListFrame(app, which, out)) return false;
     out.contentHeight = panelListContent(app, which);
