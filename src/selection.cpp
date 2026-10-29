@@ -250,6 +250,11 @@ static std::wstring hrefAttribute(const std::string& url) {
     return out;
 }
 
+// Lists and their items add no space of their own: Word and Outlook put a
+// gap above and below each list, on top of the empty lines the copy keeps,
+// and a task line split its list into separately spaced pieces
+static const wchar_t kListNoMargins[] = L" style=\"margin-top:0;margin-bottom:0\"";
+
 std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end) {
     start = std::min(start, app.docText.size());
     end = std::min(end, app.docText.size());
@@ -293,21 +298,33 @@ std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end) {
             const App::DocListItem* item = chain[level];
             if (!(sibling && level == same)) {
                 if (item->ordered) {
-                    html += item->number == 1 ? std::wstring(L"<ol>")
-                            : L"<ol start=\"" + std::to_wstring(item->number) + L"\">";
+                    html += L"<ol";
+                    if (item->number != 1) html += L" start=\"" + std::to_wstring(item->number) + L"\"";
                 } else {
-                    html += L"<ul>";
+                    html += L"<ul";
                 }
+                html += kListNoMargins;
+                html += L">";
             }
-            html += L"<li>";
+            html += L"<li";
+            html += kListNoMargins;
+            html += L">";
             openItems.push_back(item);
         }
     };
     // A line is a <div> or <p> (lineEnd closes it) or part of an open <li>.
-    // listContext: the last line was a list line, so the empty lines after
-    // it go.
+    // listContext: the last line was a list line. The empty lines after it
+    // wait in blankAfterList: they go between the items of one list, and
+    // stand as one empty line before anything else, like the one before.
     const wchar_t* lineEnd = nullptr;
     bool listContext = false;
+    bool blankAfterList = false;
+    const void* lastList = nullptr;  // the outermost list of the last list line
+    auto leaveLists = [&]() {
+        closeListsFrom(0);
+        if (blankAfterList) html += L"<div><br></div>\r\n";
+        blankAfterList = false;
+    };
     const App::DocListItem* marked = nullptr;  // the last item given a text marker
     // Opens the line at i: a <div>, or the <li> of the list item around it
     // (an empty item counts as around its own position)
@@ -326,11 +343,17 @@ std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end) {
         chain.resize(firstTask);
         listContext = !chain.empty() || !asText.empty();
         if (!listContext) {
-            closeListsFrom(0);
+            leaveLists();
+            lastList = nullptr;
             html += L"<div>";
             lineEnd = L"</div>";
             return;
         }
+        // Another list, even right after one, stands apart as on screen
+        const void* list = (chain.empty() ? asText.front() : chain.front())->list;
+        if (list != lastList) leaveLists();
+        blankAfterList = false;
+        lastList = list;
         size_t same = 0;
         while (same < openItems.size() && same < chain.size() && openItems[same] == chain[same])
             same++;
@@ -377,8 +400,9 @@ std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end) {
                 html += lineEnd;
                 html += L"\r\n";
                 lineEnd = nullptr;
-            } else if (!inLine && !listContext) {
-                html += L"<div><br></div>\r\n";
+            } else if (!inLine) {
+                if (listContext) blankAfterList = true;
+                else html += L"<div><br></div>\r\n";
             }
             inLine = false;
             lineStart = true;

@@ -55,6 +55,14 @@ Tasks under an item:
    - [ ] fenced
 2. Plant
 
+Packing:
+
+- Pack
+  - tent
+  - stove
+
+The lists end here.
+
 > Quoted text with **bold inside** the quote.
 
 | Bed | Status |
