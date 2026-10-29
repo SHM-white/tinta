@@ -104,6 +104,46 @@ void layoutTests(App& app) {
           "a bold link nests <b> in <a>, its address escaped");
     check(!has(all, L"<b>Rich copy") && !has(all, L"<b>Message"),
           "headings copy as their text, as before");
+    // Lists paste as lists: bullets, numbers and nesting, without the empty
+    // line between items
+    check(has(all, L"<div><b>Please let me know in writing,</b></div>\r\n<div><br></div>\r\n"
+                   L"<ul><li>whether the <b>north bed</b> can be planted,</li>\r\n"
+                   L"<li>which <b>watering schedule</b> applies and</li>\r\n"
+                   L"<li>which paths must stay clear.</li></ul>\r\n<div>In order:</div>"),
+          "a bullet list pastes as <ul> items: " + narrow(all));
+    check(has(all, L"<ol><li>Dig the bed.</li>\r\n<li>Water it.<ul><li>morning</li>\r\n"
+                   L"<li>evening</li></ul>\r\n</li>\r\n<li>Mulch.</li></ol>\r\n"),
+          "a numbered list with a nested list");
+    // A task item pastes as an indented paragraph with its checkbox: Word
+    // puts a bullet before any list item, whatever its style. The plain
+    // items around it stay lists, without empty lines between.
+    const std::wstring task = L"<p style=\"margin:0 0 0 36pt\">";
+    check(has(all, L"<li>Mulch.</li></ol>\r\n" + task + L"\u2611 seeds bought</p>\r\n" +
+                   task + L"\u2610 tools cleaned</p>\r\n<ul><li>Buy groceries</li></ul>\r\n"),
+          "a task list pastes its checkboxes: " + narrow(all));
+    check(has(all, L"<ul><li>Buy groceries</li></ul>\r\n" + task +
+                   L"\u2611 Buy milk</p>\r\n<ul><li>Drive home</li></ul>\r\n"),
+          "a list mixing tasks and plain items");
+    // An empty item still pastes as an item, and a list right after another
+    // (a different bullet character) pastes as its own list
+    check(has(all, L"<li>Drive home</li></ul>\r\n<ul><li>First</li>\r\n<li></li>\r\n"
+                   L"<li>Third</li></ul>"),
+          "an empty item and a list right after another");
+    // A numbered list split by a task goes on at the number shown (a task
+    // item takes none), and tasks under an item indent inside it
+    check(has(all, L"<ol><li>Book</li></ol>\r\n" + task + L"\u2611 Pay</p>\r\n"
+                   L"<ol start=\"2\"><li>Go</li></ol>"),
+          "a numbered list around a task keeps its numbers");
+    check(has(all, L"<ol><li>Plan" + task + L"\u2611 measured</p>\r\n" + task +
+                   L"\u2610 fenced</p>\r\n</li>\r\n<li>Plant</li></ol>"),
+          "tasks under an item");
+    size_t middle = text.find(L"watering schedule");
+    if (middle != std::wstring::npos) {
+        std::wstring part = selectionHtmlForRange(app, middle, text.find(L"stay clear") + 10);
+        check(part == L"<ul><li><b>watering schedule</b> applies and</li>\r\n"
+                      L"<li>which paths must stay clear</li></ul>\r\n",
+              "a selection starting inside a list item still pastes a list: " + narrow(part));
+    }
 
     // A selection that starts or ends inside a bold span opens and closes it
     size_t at = text.find(L"Caf\u00e9");
@@ -119,7 +159,9 @@ void layoutTests(App& app) {
     // A rebuilt layout leaves no stale ranges behind
     size_t ranges = app.docBoldRanges.size();
     size_t italics = app.docItalicRanges.size(), links = app.docLinkRanges.size();
+    size_t items = app.docListItems.size();
     layoutDocument(app);
+    check(app.docListItems.size() == items && items == 23, "relayout records each list item once");
     check(app.docBoldRanges.size() == ranges, "relayout records each bold span once");
     check(app.docItalicRanges.size() == italics && italics >= 3 && app.docLinkRanges.size() == links &&
               links == 2,
