@@ -24,11 +24,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # /MP compiles a target's files on all the runner's cores, and
+      # --parallel builds the targets side by side
       - name: Configure CMake
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        env:
+          CFLAGS: /MP
+          CXXFLAGS: /MP
 
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build build --config Release --parallel
 
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
