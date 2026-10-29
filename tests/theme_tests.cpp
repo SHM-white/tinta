@@ -8,6 +8,11 @@
 #include "syntax.h"
 #include "utils.h"
 
+#include "glyph_fonts.h"
+
+#include <dwrite_2.h>
+#include <wrl/client.h>
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -386,6 +391,145 @@ std::string docxRun(const std::string& zip, const std::string& marker) {
 }
 }
 
+// #264: a theme naming faces this PC lacks (Windows 10 has no Cascadia
+// Code) draws with installed ones, and the fallback list keeps the signs
+// Segoe UI Emoji maps to the wrong glyph away from it
+void missingFaces(const std::filesystem::path& dir) {
+    namespace fs = std::filesystem;
+    using Microsoft::WRL::ComPtr;
+    const fs::path fixture = TINTA_MISSING_FONT_FIXTURE;
+    { std::ofstream out(dir / "themes.ini", std::ios::binary);
+      out << read(fixture.parent_path() / "missing-font-themes.ini"); }
+    loadCustomThemes();
+    int missing = -1;
+    for (int i = 0; i < themeCount(); ++i)
+        if (themeAt(i).name && std::wstring(themeAt(i).name) == L"Missing faces") missing = i;
+    check(missing >= 0, "the theme with missing faces loads");
+    if (missing < 0) return;
+
+    auto state = std::make_unique<App>();
+    App& app = *state;
+    if (!initD2D(app)) { check(false, "D2D initializes"); return; }
+    app.width = 1050;
+    app.height = 900;
+    app.readingWidthPct = 100;
+    ComPtr<IDWriteFontCollection> fonts;
+    app.dwriteFactory->GetSystemFontCollection(&fonts);
+    auto installed = [&](const wchar_t* name) {
+        UINT32 index = 0;
+        BOOL exists = FALSE;
+        return name && SUCCEEDED(fonts->FindFamilyName(name, &index, &exists)) && exists;
+    };
+    auto familyOf = [](IDWriteTextFormat* format) {
+        if (!format) return std::wstring();
+        std::wstring name(format->GetFontFamilyNameLength() + 1, L'\0');
+        format->GetFontFamilyName(name.data(), (UINT32)name.size());
+        name.resize(name.size() - 1);
+        return name;
+    };
+    // The faces a layout draws its glyphs in, after the document fallback
+    auto drawnIn = [&](IDWriteTextLayout* layout) {
+        ComPtr<IDWriteTextLayout2> layout2;
+        if (app.fontFallback && SUCCEEDED(layout->QueryInterface(IID_PPV_ARGS(&layout2))))
+            layout2->SetFontFallback(app.fontFallback);
+        glyphfonts::RunFonts runs(fonts.Get());
+        layout->Draw(nullptr, &runs, 0, 0);
+        return runs.families;
+    };
+    auto textIn = [&](IDWriteTextFormat* format, const std::wstring& text) {
+        ComPtr<IDWriteTextLayout> layout;
+        if (!format || FAILED(app.dwriteFactory->CreateTextLayout(text.c_str(), (UINT32)text.size(),
+                format, 2000.0f, 200.0f, &layout)))
+            return std::wstring(L"(no layout)");
+        return drawnIn(layout.Get());
+    };
+
+    applyTheme(app, missing);
+    check(std::wstring(themeAt(missing).fontFamily) == L"NoSuchText264" &&
+              std::wstring(themeAt(missing).codeFontFamily) == L"NoSuchMono264",
+          "themes.ini and the theme editor keep the faces the theme names");
+    const wchar_t* nearest = installed(L"Cascadia Mono")   ? L"Cascadia Mono"
+                             : installed(L"Cascadia Code") ? L"Cascadia Code"
+                                                           : L"Consolas";
+    const std::wstring code = app.theme.codeFontFamily ? app.theme.codeFontFamily : L"";
+    check(code == nearest, "a missing code face gives way to the nearest installed one");
+    check(app.theme.fontFamily && std::wstring(app.theme.fontFamily) == L"Segoe UI",
+          "a missing text face gives way to Segoe UI");
+    check(!app.theme.headingFontFamily, "a missing heading face leaves headings to the body's");
+    check(familyOf(app.codeFormat) == code && familyOf(app.codeBoldFormat) == code &&
+              familyOf(app.editorTextFormat) == code,
+          "code blocks and the editor take the installed face");
+    check(familyOf(app.textFormat) == L"Segoe UI" && familyOf(app.headingFormats[0]) == L"Segoe UI",
+          "body text and headings take Segoe UI");
+    // The editor's columns assume one pitch
+    auto width = [&](const wchar_t* text) {
+        ComPtr<IDWriteTextLayout> layout;
+        DWRITE_TEXT_METRICS metrics{};
+        if (SUCCEEDED(app.dwriteFactory->CreateTextLayout(text, (UINT32)wcslen(text),
+                app.editorTextFormat, 2000.0f, 200.0f, &layout)))
+            layout->GetMetrics(&metrics);
+        return metrics.widthIncludingTrailingWhitespace;
+    };
+    check(std::abs(width(L"iiiiiiiiii") - width(L"MMMMMMMMMM")) < 0.01f &&
+              std::abs(width(L"M") - app.editorCharWidth) < 0.01f,
+          "the editor keeps a fixed pitch");
+    check(textIn(app.editorTextFormat, L"Plain text 0123") == code,
+          "plain text in the editor is all in the code face");
+    check(textIn(app.editorTextFormat, L"\u221A2 \u221E \u222B \u2260 \u2219")
+                  .find(L"Segoe UI Emoji") == std::wstring::npos,
+          "the editor draws the signs without the emoji face");
+
+    // The fixture laid out: no run but the emoji draws from the emoji face
+    auto doc = app.parser.parse(read(fixture));
+    check(doc.success, "the missing-font fixture parses");
+    app.root = doc.root;
+    for (int pageWidth : {1050, 520}) {
+        app.width = pageWidth;
+        layoutDocument(app);
+        check(app.codeBlocks.size() == 2, "both code blocks lay out");
+        int runs = 0, emojiFace = 0;
+        for (const auto& run : app.layoutTextRuns) {
+            if (!run.layout || !run.docLength) continue;
+            const std::wstring text = app.docText.substr(run.docStart, run.docLength);
+            bool emoji = text.find(L"\u2705") != std::wstring::npos;
+            for (wchar_t c : text) emoji = emoji || (c >= 0xD800 && c <= 0xDFFF);
+            if (emoji) continue;
+            ++runs;
+            if (drawnIn(run.layout).find(L"Segoe UI Emoji") != std::wstring::npos) ++emojiFace;
+        }
+        check(runs > 20 && emojiFace == 0, "the page draws no sign from the emoji face");
+    }
+
+    // Applying the theme again keeps its formats: the check compares the
+    // faces the formats were made from with those the theme draws with
+    IDWriteTextFormat* before = app.textFormat;
+    applyTheme(app, missing);
+    check(app.textFormat == before, "applying the same theme again keeps its formats");
+    // The theme chooser previews the theme in the faces it draws with
+    ensureThemePreviewFormats(app);
+    check((int)app.themePreviewFormats.size() > missing &&
+              familyOf(app.themePreviewFormats[missing].code) == code &&
+              familyOf(app.themePreviewFormats[missing].preview) == L"Segoe UI",
+          "the theme chooser previews the installed faces");
+    // A theme whose faces are installed keeps them
+    applyTheme(app, 0);
+    check(app.theme.codeFontFamily == themeAt(0).codeFontFamily &&
+              app.theme.fontFamily == themeAt(0).fontFamily,
+          "installed faces stay as the theme names them");
+
+    // The fallback list, for a face without the signs: Segoe UI, then
+    // Segoe UI Symbol draw them; the emoji face keeps the emoji
+    ComPtr<IDWriteTextFormat> lacking;
+    app.dwriteFactory->CreateTextFormat(L"NoSuchFace264", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 16.0f, L"en-us", &lacking);
+    for (const wchar_t* sign : {L"\u221A", L"\u221E", L"\u222B", L"\u2260", L"\u2219",
+                                L"\u02D8", L"\u02D9", L"\uFB02"})
+        check(textIn(lacking.Get(), sign) == L"Segoe UI", "a sign the face lacks comes from Segoe UI");
+    check(textIn(lacking.Get(), L"\u221B") == L"Segoe UI Symbol",
+          "maths Segoe UI lacks comes from Segoe UI Symbol");
+    check(textIn(lacking.Get(), L"\U0001F600") == L"Segoe UI Emoji", "emoji still come from the emoji face");
+}
+
 int main(int argc, char** argv) {
     namespace fs = std::filesystem;
     // CTest stages this executable in an isolated portable folder. Refuse
@@ -502,7 +646,8 @@ int main(int argc, char** argv) {
         themeEditorFontsApply(app, read(TINTA_THEME_FONTS_FIXTURE));
     }
     themeEditorFonts(dir);
-    inlineCodeBackground(dir);  // last: it rewrites themes.ini
+    inlineCodeBackground(dir);  // these two rewrite themes.ini
+    missingFaces(dir);
     CoUninitialize();
     std::cout << "Inline code themes: " << failures << " failures\n";
     return failures ? 1 : 0;
