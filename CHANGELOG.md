@@ -1,5 +1,15 @@
 # Changelog
 
+## [v3.9.5] - 2026-10-29
+
+### Added
+- Selected text in the editor can be dragged to another place to move it, or with Ctrl held as you let go, to leave a copy there. A caret shows where it will land, the editor scrolls when you drag past its top or bottom edge, one Ctrl+Z undoes it, and the text stays selected. A plain click on a selection still places the caret, and Esc cancels a drag. Requested by @nokia5118 (#289)
+- Copying from the viewer pastes lists as lists in Outlook and Word: bullet and numbered lists keep their nesting and start numbers, task items paste with their checkboxes, and each list keeps one empty line above and below it. Contributed by @sebvannistel (#290)
+
+### Fixed
+- A theme font that isn't installed gives way to one that is: Midnight and Arctic use Cascadia Code, which Windows 10 doesn't have. The editor and code blocks fell back to a font that isn't monospaced and that shows √ as Ã, ∞ as ° and ≠ not at all; code now takes Cascadia Mono or Consolas, and maths signs never come from the emoji font. Reported by @a86022 (#264)
+- The editor's scrollbar stays below the tab bar instead of sliding under it, and beside the editor the preview no longer jumps ahead while the editor's top lines are front matter or a first heading; it moves down from the top of the page. Reported by @go4399 (#291)
+
 ## [v3.9.4] - 2026-10-28
 
 ### Added
