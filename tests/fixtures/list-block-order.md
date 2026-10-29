@@ -89,3 +89,15 @@ Final surrounding paragraph.
 <ol><li><a id="list-heading-target"></a><h3>Anchored HTML heading</h3><a id="list-heading-tail"></a></li></ol>
 
 After the HTML wrapper and anchor examples.
+
+## Heading-first tasks
+
+- [ ]
+  # Unchecked task heading with enough words to wrap at a narrow width
+- [x]
+  ### Finished task heading
+- [ ]
+  ###### Small task heading
+- [ ] Following task paragraph control.
+
+After the heading-first tasks.

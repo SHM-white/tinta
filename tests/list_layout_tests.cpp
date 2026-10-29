@@ -99,7 +99,9 @@ void checkFixture(const App& app) {
         L"Following the unordered headings.", L"Surrounding quote",
         L"surrounding code", L"Final surrounding paragraph", L"HTML wrappers and empty anchors",
         L"Wrapped HTML heading", L"Unanchored HTML heading", L"Anchored HTML heading",
-        L"After the HTML wrapper and anchor examples."});
+        L"After the HTML wrapper and anchor examples.", L"Heading-first tasks",
+        L"Unchecked task heading", L"Finished task heading", L"Small task heading",
+        L"Following task paragraph control.", L"After the heading-first tasks."});
     checkTable(app);
     const float scale = app.contentScale * app.zoomFactor;
     const auto* before = runFor(app, L"Before table paragraph");
@@ -117,7 +119,7 @@ void checkFixture(const App& app) {
     const auto* deeper = runFor(app, L"Nested deeper");
     check(nested && deeper && closeEnough(nested->pos.x, app.layoutIndent + 48 * scale) &&
           closeEnough(deeper->pos.x, app.layoutIndent + 72 * scale), "nested lists retain each indentation level");
-    check(app.taskRects.size() == 2 && !app.taskRects[0].checked && app.taskRects[1].checked,
+    check(app.taskRects.size() == 6 && !app.taskRects[0].checked && app.taskRects[1].checked,
           "task checkboxes retain checked state");
     const wchar_t* tasks[] = {L"Pending task", L"Completed task"};
     for (size_t i = 0; i < app.taskRects.size() && i < std::size(tasks); ++i) {
@@ -135,7 +137,7 @@ void checkFixture(const App& app) {
                      closeEnough(rect.rect.right - rect.rect.left, 4) &&
                      rect.rect.top <= quote->bounds.top && rect.rect.bottom >= quote->bounds.bottom;
           }), "list-contained quote retains its inset and bar");
-    check(app.codeBlocks.size() == 2 && app.headings.size() == 15, "mixed headings and fences keep block layout");
+    check(app.codeBlocks.size() == 2 && app.headings.size() == 19, "mixed headings and fences keep block layout");
     const auto* ruleBefore = runFor(app, L"After heading paragraph");
     const auto* ruleAfter = runFor(app, L"After rule paragraph");
     check(ruleBefore && ruleAfter && std::any_of(app.layoutLines.begin(), app.layoutLines.end(), [&](const auto& line) {
@@ -354,6 +356,65 @@ void anchorBufferCases(App& app) {
           "anchor-only paragraph pins once without advancing the heading");
 }
 
+void taskHeadingCases(App& app) {
+    const float scale = app.contentScale * app.zoomFactor;
+    for (bool html : {false, true}) for (bool checked : {false, true}) for (int level : {1, 3, 6}) {
+        const std::string title = "Task heading with enough words to wrap at narrow widths while keeping its checkbox beside the first line";
+        const std::string tag = "h" + std::to_string(level);
+        const std::string heading = html ? "<" + tag + ">" + title + "</" + tag + ">" :
+            std::string(level, '#') + (level == 6 ? " ^up^ " : " ") + title;
+        // The task marker needs its own line for MD4C to recognize a heading block.
+        // HTML also needs a blank line before the nested Markdown list.
+        auto parsed = app.parser.parse(std::string(checked ? "- [x]\n  " : "- [ ]\n  ") + heading +
+            (html ? "\n\n" : "\n") + "  - [x] Nested task control\n- [ ] Following task control\n");
+        check(parsed.success && parsed.root && !parsed.root->children.empty(), "heading-first task parses");
+        if (!parsed.success || !parsed.root || parsed.root->children.empty()) continue;
+        const auto& list = parsed.root->children[0];
+        check(list->type == ElementType::List && list->children.size() == 2, "task heading keeps its nested and following items");
+        if (list->type != ElementType::List || list->children.empty()) continue;
+        const auto& item = list->children[0];
+        check(item->isTask && item->taskChecked == checked && !item->children.empty() &&
+              item->children[0]->type == (html ? ElementType::HtmlBlock : ElementType::Heading),
+              "task state and first heading block survive parsing");
+        app.root = parsed.root;
+        layoutDocument(app);
+        const auto* text = runFor(app, L"Task heading");
+        const auto* nested = runFor(app, L"Nested task control");
+        const auto* following = runFor(app, L"Following task control");
+        check(text && nested && following && app.taskRects.size() == 3 && app.headings.size() == 1,
+              "heading-first task retains its text, checkboxes and native heading");
+        if (!text || !nested || !following || app.taskRects.size() != 3) continue;
+        const auto& task = app.taskRects[0];
+        const auto& control = app.taskRects[2];
+        check(task.checked == checked && task.markOffset == item->taskMarkOffset,
+              "heading task retains its checked state and source mark");
+        check(closeEnough(baseline(*text) - task.rect.top, baseline(*following) - control.rect.top),
+              "heading task checkbox shares the ordinary task's baseline alignment");
+        check(closeEnough(app.taskRects[1].rect.top, nested->pos.y) &&
+              closeEnough(control.rect.top, following->pos.y), "moving a heading checkbox leaves nested and following tasks in place");
+        check(closeEnough(task.rect.left, control.rect.left) && closeEnough(task.rect.right, control.rect.right) &&
+              closeEnough(task.rect.bottom - task.rect.top, control.rect.bottom - control.rect.top),
+              "heading task keeps ordinary checkbox indentation and hit size");
+        const auto box = D2D1::RectF(task.rect.left + 4 * scale, task.rect.top + 4 * scale,
+                                   task.rect.right - 4 * scale, task.rect.bottom - 4 * scale);
+        if (checked) check(std::any_of(app.layoutRects.begin(), app.layoutRects.end(), [&](const auto& r) {
+            return closeEnough(r.rect.left, box.left) && closeEnough(r.rect.right, box.right) &&
+                   closeEnough(r.rect.top, box.top) && closeEnough(r.rect.bottom, box.bottom);
+        }), "checked fill moves with its hit region");
+        int lines = 0;
+        for (const auto& line : app.layoutLines) {
+            if (line.p1.x >= box.left - 0.1f && line.p2.x >= box.left - 0.1f &&
+                line.p1.x <= box.right + 0.1f && line.p2.x <= box.right + 0.1f &&
+                line.p1.y >= box.top - 0.1f && line.p2.y >= box.top - 0.1f &&
+                line.p1.y <= box.bottom + 0.1f && line.p2.y <= box.bottom + 0.1f) ++lines;
+        }
+        check(lines == (checked ? 2 : 4), "check mark or outline moves with its hit region");
+        float size = 0;
+        text->layout->GetFontSize(0, &size);
+        check(closeEnough(size, app.headingFormats[level - 1]->GetFontSize()), "task heading retains native font size");
+    }
+}
+
 void ordinaryCases(App& app) {
     const float scale = app.contentScale * app.zoomFactor;
     for (bool loose : {false, true}) {
@@ -411,6 +472,7 @@ int main() {
                     firstBlockCases(app);
                     htmlHeadingCases(app);
                     anchorBufferCases(app);
+                    taskHeadingCases(app);
                 }
             }
         }

@@ -2833,6 +2833,7 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
     for (const auto& child : elem->children) {
         if (child->type != ElementType::ListItem) continue;
 
+        const LayoutSnapshot markerStart = takeSnapshot(app);
         size_t markerIndex = SIZE_MAX;
         size_t listItem = app.docListItems.size();
         app.docListItems.push_back({app.docText.size(), app.docText.size(), listDepth - 1,
@@ -2883,6 +2884,7 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
             addTextRun(app, std::move(info), pos, bounds, app.theme.text, 0, 0, false);
         }
 
+        const LayoutSnapshot contentStart = takeSnapshot(app);
         const size_t headingStart = app.headings.size();
         float itemStartY = y;
 
@@ -2912,17 +2914,33 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
         }
 
         const auto* first = firstListContent(child->children);
-        if (markerIndex < app.layoutTextRuns.size() && headingStart < app.headings.size() &&
-            first && first->type == ElementType::Heading) {
+        if (headingStart < app.headings.size() && first && first->type == ElementType::Heading) {
             // Move only the marker: keep heading margins and align to the main
             // text baseline, even when the heading starts with a raised script.
-            auto& marker = app.layoutTextRuns[markerIndex];
             auto format = app.headingFormats[first->level - 1];
             float headingBaseline = app.headings[headingStart].y + formatBaseline(app, format ? format : app.textFormat);
-            float shift = headingBaseline - marker.pos.y - layoutBaseline(marker.layout);
-            marker.pos.y += shift;
-            marker.bounds.top += shift;
-            marker.bounds.bottom += shift;
+            if (child->isTask) {
+                float shift = headingBaseline - itemStartY - formatBaseline(app, app.textFormat);
+                // Move only this checkbox, including its hit region; nested content stays put.
+                for (size_t i = markerStart.rects; i < contentStart.rects; ++i) {
+                    app.layoutRects[i].rect.top += shift;
+                    app.layoutRects[i].rect.bottom += shift;
+                }
+                for (size_t i = markerStart.lines; i < contentStart.lines; ++i) {
+                    app.layoutLines[i].p1.y += shift;
+                    app.layoutLines[i].p2.y += shift;
+                }
+                for (size_t i = markerStart.tasks; i < contentStart.tasks; ++i) {
+                    app.taskRects[i].rect.top += shift;
+                    app.taskRects[i].rect.bottom += shift;
+                }
+            } else if (markerIndex < app.layoutTextRuns.size()) {
+                auto& marker = app.layoutTextRuns[markerIndex];
+                float shift = headingBaseline - marker.pos.y - layoutBaseline(marker.layout);
+                marker.pos.y += shift;
+                marker.bounds.top += shift;
+                marker.bounds.bottom += shift;
+            }
         }
 
         if (listItem < app.docListItems.size()) app.docListItems[listItem].end = app.docText.size();
