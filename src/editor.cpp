@@ -1837,7 +1837,8 @@ bool editorReadingButtonNeedsTicks(const App& app) {
 
 void editorReadingButtonHover(App& app, float x, float y) {
     D2D1_RECT_F r = editorReadingButtonRect(app);
-    bool over = app.editMode && !app.editorSelecting && !app.draggingSeparator &&
+    bool over = app.editMode && !app.editorSelecting && !app.editorTextDrag.armed &&
+                !app.draggingSeparator &&
                 !app.editCtxOpen &&
                 x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
     if (over == app.readButtonHover) return;
@@ -3668,6 +3669,133 @@ static size_t editorPosFromClick(App& app, int x, int y) {
     return lineStart + col;
 }
 
+// --- Dragging the selection (#289) ---
+
+// A press on the selected text: strictly inside the selection, or on one of
+// its edges with the pointer over the selected character beside it (the
+// hit rounds to the nearer edge)
+static bool editorPointInSelection(App& app, int x, int y, size_t pos) {
+    if (!app.editorHasSelection) return false;
+    const size_t selMin = editorSelMin(app), selMax = editorSelMax(app);
+    if (selMin == selMax || pos < selMin || pos > selMax) return false;
+    if (pos > selMin && pos < selMax) return true;
+    D2D1_POINT_2F edge{};
+    if (!editorCaretPointAt(app, pos, false, edge)) return false;
+    const float lineHeight = app.editorTextFormat->GetFontSize() * 1.5f;
+    if ((float)y < edge.y || (float)y >= edge.y + lineHeight) return false;
+    return pos == selMax ? (float)x < edge.x : (float)x > edge.x;
+}
+
+static void editorTextDragStop(App& app, HWND hwnd) {
+    app.editorTextDrag = {};  // first: losing the capture calls the cancel
+    KillTimer(hwnd, TIMER_EDITOR_DRAG_SCROLL);
+    if (GetCapture() == hwnd) ReleaseCapture();
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+void editorTextDragCancel(App& app, HWND hwnd) {
+    if (app.editorTextDrag.armed) editorTextDragStop(app, hwnd);
+}
+
+// Moves the selection to pos, or copies it there, as one undo step; the
+// text stays selected where it lands
+static void editorDropSelection(App& app, HWND hwnd, size_t pos, bool copy) {
+    const size_t selMin = editorSelMin(app), selMax = editorSelMax(app);
+    if (!app.editorHasSelection || selMin == selMax || pos > app.editorText.size()) return;
+    // Onto the selection nothing happens, and a move to either of its ends
+    // would leave the text as it is
+    if ((pos > selMin && pos < selMax) || (!copy && (pos == selMin || pos == selMax))) return;
+    const std::wstring text = app.editorText.substr(selMin, selMax - selMin);
+    UndoGroupScope group(app);
+    const size_t caretBefore = app.editorCursorPos;
+    size_t at = pos;
+    if (!copy) {
+        pushUndo(app, App::EditAction::Delete, selMin, text, caretBefore, selMin);
+        app.editorText.erase(selMin, text.size());
+        if (at > selMin) at -= text.size();
+    }
+    app.editorText.insert(at, text);
+    pushUndo(app, App::EditAction::Insert, at, text, copy ? caretBefore : selMin, at + text.size());
+    app.editorSelStart = at;
+    app.editorSelEnd = at + text.size();
+    app.editorCursorPos = app.editorSelEnd;
+    app.editorHasSelection = true;
+    app.editorCaretUpstreamPos = std::wstring::npos;
+    app.editorDesiredCol = -1;
+    rebuildLineStarts(app);
+    scheduleReparse(app);
+    editorEnsureCursorVisible(app);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// Past the system's drag distance the drag starts. The drop caret then
+// follows the pointer over the text, and past the editor's top or bottom
+// edge the editor scrolls, faster the further out.
+static void editorTextDragMove(App& app, HWND hwnd, int x, int y) {
+    auto& drag = app.editorTextDrag;
+    drag.x = x;
+    drag.y = y;
+    if (!drag.active) {
+        if (std::abs(x - drag.startX) <= GetSystemMetrics(SM_CXDRAG) &&
+            std::abs(y - drag.startY) <= GetSystemMetrics(SM_CYDRAG)) {
+            return;
+        }
+        drag.active = true;
+    }
+    SetCursor(LoadCursor(nullptr, IDC_ARROW));
+    // Over the preview there is nowhere to drop
+    drag.dropPos = (float)x < editorPaneWidth(app) ? editorPosFromClick(app, x, y) : SIZE_MAX;
+    const float top = chromeTopHeight(app), band = dpi(app, 24.0f);
+    float vel = 0.0f;
+    if ((float)y < top + band) {
+        vel = -(top + band - (float)y) * 0.35f;
+    } else if ((float)y > (float)app.height - band) {
+        vel = ((float)y - ((float)app.height - band)) * 0.35f;
+    }
+    if (vel != 0.0f && drag.scrollVel == 0.0f) {
+        SetTimer(hwnd, TIMER_EDITOR_DRAG_SCROLL, 16, nullptr);
+    } else if (vel == 0.0f && drag.scrollVel != 0.0f) {
+        KillTimer(hwnd, TIMER_EDITOR_DRAG_SCROLL);
+    }
+    drag.scrollVel = vel;
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+void editorTextDragScroll(App& app, HWND hwnd) {
+    auto& drag = app.editorTextDrag;
+    if (!drag.active || drag.scrollVel == 0.0f || !app.editMode) {
+        KillTimer(hwnd, TIMER_EDITOR_DRAG_SCROLL);
+        drag.scrollVel = 0.0f;
+        return;
+    }
+    const float maxScroll = std::max(0.0f, app.editorContentHeight - (float)app.height);
+    const float next = std::clamp(app.editorScrollY + drag.scrollVel, 0.0f, maxScroll);
+    if (next == app.editorScrollY) return;  // at an end: the timer waits for a turn
+    app.editorScrollY = next;
+    if (drag.dropPos != SIZE_MAX) drag.dropPos = editorPosFromClick(app, drag.x, drag.y);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// The release: before the drag started it was a click, which puts the
+// caret where it pressed; after, the text lands where it lets go, a copy
+// with Ctrl held
+static void editorTextDragRelease(App& app, HWND hwnd, int x, int y) {
+    App::EditorTextDrag drag = app.editorTextDrag;
+    if (drag.active) {
+        drag.dropPos = (float)x < editorPaneWidth(app) ? editorPosFromClick(app, x, y) : SIZE_MAX;
+    }
+    editorTextDragStop(app, hwnd);
+    if (!drag.active) {
+        app.editorCursorPos = app.editorSelStart = app.editorSelEnd = drag.pressPos;
+        app.editorHasSelection = false;
+        app.editorDesiredCol = -1;
+        return;
+    }
+    if (drag.dropPos != SIZE_MAX) {
+        editorDropSelection(app, hwnd, drag.dropPos, (GetKeyState(VK_CONTROL) & 0x8000) != 0);
+    }
+}
+
 // The band the editor's scrollbar takes presses in, at the pane's right
 // edge below the tab strip
 static bool overEditorScrollbar(const App& app, float x, float y) {
@@ -3734,6 +3862,10 @@ void handleEditorMouseDown(App& app, HWND hwnd, int x, int y) {
         InvalidateRect(hwnd, nullptr, FALSE);
         return;
     }
+    // A press on the selection may drag it (#289): with a single caret, and
+    // not from a finger, whose slide extends the selection (#286)
+    const bool onSelection = !shift && app.editorExtraCarets.empty() && !app.touch.active &&
+                             editorPointInSelection(app, x, y, clickPos);
     app.editorExtraCarets.clear();
 
     // Detect double/triple click
@@ -3792,6 +3924,17 @@ void handleEditorMouseDown(App& app, HWND hwnd, int x, int y) {
             app.editorSelEnd = clickPos;
             app.editorCursorPos = clickPos;
             app.editorHasSelection = true;
+        } else if (onSelection) {
+            // The release decides: a click puts the caret here, a drag
+            // takes the selection along
+            app.editorTextDrag = {};
+            app.editorTextDrag.armed = true;
+            app.editorTextDrag.startX = app.editorTextDrag.x = x;
+            app.editorTextDrag.startY = app.editorTextDrag.y = y;
+            app.editorTextDrag.pressPos = clickPos;
+            SetCapture(hwnd);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return;
         } else {
             app.editorCursorPos = clickPos;
             app.editorSelStart = clickPos;
@@ -3806,7 +3949,11 @@ void handleEditorMouseDown(App& app, HWND hwnd, int x, int y) {
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
-void handleEditorMouseUp(App& app, HWND, int, int) {
+void handleEditorMouseUp(App& app, HWND hwnd, int x, int y) {
+    if (app.editorTextDrag.armed) {
+        editorTextDragRelease(app, hwnd, x, y);
+        return;
+    }
     if (app.editorScrollbarDragging) {
         app.editorScrollbarDragging = false;
         ReleaseCapture();
@@ -3840,6 +3987,12 @@ void handleEditorMouseMove(App& app, HWND hwnd, int x, int y) {
             TrackMouseEvent(&track);
         }
         InvalidateRect(hwnd, nullptr, FALSE);
+    }
+
+    // A dragged selection owns the pointer until its release (#289)
+    if (app.editorTextDrag.armed) {
+        editorTextDragMove(app, hwnd, x, y);
+        return;
     }
 
     // Insert-menu hover: rows highlight, parents open their submenu
@@ -4030,6 +4183,20 @@ static void editorDrawExtraCarets(App& app, float lineHeight) {
     }
 }
 
+// Where a dragged selection would land (#289): a steady caret in the
+// accent colour
+static void editorDrawDropCaret(App& app, float lineHeight) {
+    const auto& drag = app.editorTextDrag;
+    D2D1_POINT_2F point{};
+    if (!drag.active || drag.dropPos == SIZE_MAX ||
+        !editorCaretPointAt(app, drag.dropPos, false, point)) {
+        return;
+    }
+    app.brush->SetColor(app.theme.accent);
+    app.renderTarget->FillRectangle(
+        D2D1::RectF(point.x, point.y, point.x + dpi(app, 2.0f), point.y + lineHeight), app.brush);
+}
+
 // The thumb at the editor pane's right edge, on the track below the tab
 // strip: drawn from the window's top, it went under the strip (#291)
 static void renderEditorScrollbar(App& app, float editorWidth) {
@@ -4159,6 +4326,7 @@ static void renderEditorWrapped(App& app, float editorWidth) {
 
     }
     editorDrawExtraCarets(app, lineHeight);
+    editorDrawDropCaret(app, lineHeight);
 
     // Rows draw offset by the chrome strip, so the scrollable height
     // includes it — otherwise the last strip-height of source can never
@@ -4316,6 +4484,7 @@ void renderEditor(App& app, float editorWidth) {
         }
     }
     editorDrawExtraCarets(app, lineHeight);
+    editorDrawDropCaret(app, lineHeight);
 
     // The rail + gutter column last: horizontally scrolled text slides
     // under it, then the line numbers draw on top (design t11)

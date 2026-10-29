@@ -2004,6 +2004,7 @@ void renderHelpOverlay(App& app) {
         {L"Alt+\x2191 / Alt+\x2193", tr(app, "help.edit.move_line")},
         {L"Ctrl+Alt+\x2191 / \x2193", tr(app, "help.edit.add_caret")},
         {L"Alt+Click",    tr(app, "help.edit.alt_click")},
+        {L"Drag / Ctrl+Drag", tr(app, "help.edit.drag_text")},
         {L"Ctrl+D",       tr(app, "help.edit.next_match")},
     };
 

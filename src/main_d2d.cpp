@@ -1514,6 +1514,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (app && (HWND)lParam != hwnd) cancelDocumentScrollbarDrag(*app, hwnd);
             if (app && (HWND)lParam != hwnd) panelScrollbarEnd(*app, hwnd, true);
             if (app && (HWND)lParam != hwnd) sidePanelResizeEnd(*app, hwnd, true);
+            if (app && (HWND)lParam != hwnd) editorTextDragCancel(*app, hwnd);
             // Losing capture mid tab-drag (Alt+Tab, a popup stealing the
             // mouse) aborts the drag instead of leaving a stray ghost
             if (app && app->tabDragIndex >= 0 && (HWND)lParam != hwnd) {
@@ -1533,6 +1534,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (app) cancelDocumentScrollbarDrag(*app, hwnd);
             if (app) panelScrollbarEnd(*app, hwnd, true);
             if (app) sidePanelResizeEnd(*app, hwnd, true);
+            if (app) editorTextDragCancel(*app, hwnd);
             break;
 
         case WM_MOUSELEAVE:
@@ -1659,6 +1661,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             if (wParam == TIMER_TOUCH_HOLD && app) touchHold(*app, hwnd);
             if (wParam == TIMER_TOUCH_FLING && app) touchFlingStep(*app, hwnd, touchClockMs());
+            if (wParam == TIMER_EDITOR_DRAG_SCROLL && app) editorTextDragScroll(*app, hwnd);
             if (wParam == TIMER_IMAGE_REFLOW && app) {
                 // One relayout for however many images arrived since armed
                 KillTimer(hwnd, TIMER_IMAGE_REFLOW);

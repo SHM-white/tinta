@@ -39,6 +39,11 @@ void handleEditorMouseDown(App& app, HWND hwnd, int x, int y);
 void handleEditorMouseUp(App& app, HWND hwnd, int x, int y);
 void handleEditorMouseMove(App& app, HWND hwnd, int x, int y);
 void handleEditorMouseWheel(App& app, HWND hwnd, float delta);
+// A dragged selection (#289): TIMER_EDITOR_DRAG_SCROLL scrolls the editor
+// while the pointer is past its top or bottom edge; Esc, a lost capture or
+// a cancelled mode put the drag away and leave the text as it was
+void editorTextDragScroll(App& app, HWND hwnd);
+void editorTextDragCancel(App& app, HWND hwnd);
 
 // Editor rendering
 void renderEditor(App& app, float editorWidth);

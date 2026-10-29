@@ -50,6 +50,7 @@ inline int64_t usElapsed(Clock::time_point start) {
 #define TIMER_TAB_HOVER_CARD 13
 #define TIMER_TOUCH_HOLD 14
 #define TIMER_TOUCH_FLING 15
+#define TIMER_EDITOR_DRAG_SCROLL 16
 
 // Posted to continue an incomplete document layout in time-budgeted chunks
 #define WM_APP_LAYOUT_CHUNK (WM_APP + 1)
@@ -636,6 +637,18 @@ struct App {
     bool editorScrollbarDragging = false;
     float editorScrollbarDragStartY = 0.0f;
     float editorScrollbarDragStartScroll = 0.0f;
+    // The selection dragged to move it, or with Ctrl to copy it (#289):
+    // armed by a press on the selection, a drag once the pointer passes
+    // the system's drag distance
+    struct EditorTextDrag {
+        bool armed = false;
+        bool active = false;
+        int startX = 0, startY = 0;
+        int x = 0, y = 0;            // the pointer, for the edge scrolling
+        size_t pressPos = 0;         // a click without a drag puts the caret here
+        size_t dropPos = SIZE_MAX;   // where the text lands; SIZE_MAX off the text
+        float scrollVel = 0.0f;      // edge scrolling per timer tick
+    } editorTextDrag;
     // Only the primary window persists the tab session; satellites
     // (--cascade/--new/drag-outs) neither restore nor overwrite it
     bool sessionOwner = true;
