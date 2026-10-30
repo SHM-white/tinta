@@ -3147,7 +3147,34 @@ static bool loadSvgBitmap(App& app, const std::wstring& path,
 }
 
 static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
-    auto it = app.imageCache.find(src);
+    // Remote images load on a worker thread — a synchronous download here
+    // stalled layout for seconds per unreachable URL (#44)
+    bool isUrl = (src.rfind("http://", 0) == 0 || src.rfind("https://", 0) == 0);
+
+    std::wstring widePath;
+    std::wstring folder;
+    if (!isUrl) {
+        // Resolve relative to the current file's directory. Both strings are
+        // UTF-8 and must be widened explicitly: a narrow filesystem::path
+        // decodes through the ANSI codepage and mangles non-ASCII paths (#87)
+        // Decode URL escapes once before converting UTF-8 to a native path
+        // (#293). Remote URLs keep their original encoding.
+        std::wstring wsrc = toWide(qmd::decodeLinkComponent(src));
+        if (!app.currentFile.empty()) {
+            folder = std::filesystem::path(toWide(app.currentFile)).parent_path().wstring();
+        } else {
+            // An untitled note has no folder of its own: relative images
+            // resolve against the launch folder, as they did while the
+            // process still worked there (#253)
+            folder = launchDirectory();
+        }
+        widePath = (std::filesystem::path(folder) / wsrc).wstring();
+    }
+
+    // A local image is cached as the file it resolves to: documents in two
+    // folders that both show "shot.png" each get their own
+    const std::string key = isUrl ? src : wideToUtf8(widePath);
+    auto it = app.imageCache.find(key);
     if (it != app.imageCache.end()) {
         app.touchImageCacheEntry(it->second);
         return it->second;
@@ -3157,15 +3184,10 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
     entry.failed = true;  // assume failure
 
     if (!app.wicFactory || !app.renderTarget) {
-        app.storeImageCacheEntry(src, std::move(entry));
-        return app.imageCache[src];
+        app.storeImageCacheEntry(key, std::move(entry));
+        return app.imageCache[key];
     }
 
-    std::wstring widePath;
-
-    // Remote images load on a worker thread — a synchronous download here
-    // stalled layout for seconds per unreachable URL (#44)
-    bool isUrl = (src.rfind("http://", 0) == 0 || src.rfind("https://", 0) == 0);
     if (isUrl) {
         entry.failed = false;
         entry.pending = true;
@@ -3181,23 +3203,6 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
             failed.failed = true;
         }
         return app.imageCache[src];
-    } else {
-        // Resolve relative to the current file's directory. Both strings are
-        // UTF-8 and must be widened explicitly: a narrow filesystem::path
-        // decodes through the ANSI codepage and mangles non-ASCII paths (#87)
-        // Decode URL escapes once before converting UTF-8 to a native path
-        // (#293). Remote URLs above retain their original encoding.
-        std::wstring wsrc = toWide(qmd::decodeLinkComponent(src));
-        if (!app.currentFile.empty()) {
-            std::filesystem::path basePath(toWide(app.currentFile));
-            std::filesystem::path imgPath = basePath.parent_path() / wsrc;
-            widePath = imgPath.wstring();
-        } else {
-            // An untitled note has no folder of its own: relative images
-            // resolve against the launch folder, as they did while the
-            // process still worked there (#253)
-            widePath = (std::filesystem::path(launchDirectory()) / wsrc).wstring();
-        }
     }
 
     // SVG renders through Direct2D's SVG document support instead of WIC
@@ -3207,8 +3212,8 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
         if (lower.size() > 4 &&
             lower.compare(lower.size() - 4, 4, L".svg") == 0) {
             loadSvgBitmap(app, widePath, entry);
-            app.storeImageCacheEntry(src, std::move(entry));
-            return app.imageCache[src];
+            app.storeImageCacheEntry(key, std::move(entry));
+            return app.imageCache[key];
         }
     }
 
@@ -3217,8 +3222,8 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
                                  app.renderTarget->GetMaximumBitmapSize(), image)))
         createDecodedBitmap(app, image, entry);
 
-    app.storeImageCacheEntry(src, std::move(entry));
-    return app.imageCache[src];
+    app.storeImageCacheEntry(key, std::move(entry));
+    return app.imageCache[key];
 }
 
 static void layoutImage(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {

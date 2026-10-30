@@ -247,6 +247,39 @@ void encodedImagePaths(App& app) {
           "remote image URLs retain their original percent encoding");
 }
 
+// Two notes in different folders that both show "shot.png" each show
+// their own, in either order and as often as they switch: the cache
+// holds the file a document names, not the name
+void imagesPerDocument(App& app) {
+    app.clearLayoutCache();
+    app.releaseImageCache();
+    app.contentScale = 1.0f;
+    updateTextFormats(app);
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const char* folder : {"first", "second"}) {
+            app.currentFile = std::string(TINTA_SAME_IMAGE_FIXTURE) + "/" + folder + "/notes.md";
+            std::ifstream file(app.currentFile, std::ios::binary);
+            const std::string source((std::istreambuf_iterator<char>(file)), {});
+            check(!source.empty(), "same-name image fixture is readable");
+            app.root = app.parser.parse(source).root;
+            for (int width : {1050, 650}) {
+                app.width = width;
+                layoutDocument(app);
+                ensureLayoutComplete(app);
+                const UINT expected = folder[0] == 'f' ? 120 : 240;
+                bool own = app.layoutBitmaps.size() == 4;
+                for (const auto& bitmap : app.layoutBitmaps)
+                    own = own && bitmap.bitmap->GetPixelSize().width == expected;
+                check(own, "each note shows the image from its own folder");
+                check(app.tableRects.size() == 1 && app.codeBlocks.size() == 1 &&
+                      app.docText.find(L"Surrounding content survives.") != std::wstring::npos,
+                      "same-name images keep the notes' mixed content");
+                drawImages(app);
+            }
+        }
+    }
+}
+
 // Hover, press and release through the real handlers, as a separate click
 // rather than the second half of a double-click
 void click(App& app, float x, float y) {
@@ -326,6 +359,7 @@ int runImageTests(const char* remoteBase) {
     mixedLayout(app);
     lightboxDismissal(app);
     encodedImagePaths(app);
+    imagesPerDocument(app);
     if (remoteBase) remoteImages(app, remoteBase);
     DestroyWindow(app.hwnd);
     app.hwnd = nullptr;
