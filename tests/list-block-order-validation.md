@@ -30,8 +30,8 @@ page breaks keep every text run on one page, list markers included.
   does. Crafted documents behaved the same with and without the PR: 4000
   nested `<div>` in a list item and 400 nested Markdown lists printed
   fine; 1000 nested raw HTML `<ul><li>` crashed both builds (access
-  violation) and 4000 hung both past 90 s. That crash predates the PR and
-  is left for a separate fix.
+  violation) and 4000 hung both past 90 s. That crash predates the PR; the
+  nesting limit that fixed it is in `deep-nesting-validation.md`.
 
 ## Checks
 
@@ -57,4 +57,5 @@ the `compare-*.png` captures (ignored).
 
 - The Remote Desktop session was locked, so the window was not captured;
   print pages and exports are drawn by the same layout.
-- Raw HTML nested about a thousand lists deep still crashes, as before.
+- Raw HTML nested about a thousand lists deep crashed, as before; it was
+  fixed separately.

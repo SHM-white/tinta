@@ -324,6 +324,13 @@ if(BUILD_TESTING)
         -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/list-layout-test-$<CONFIG>
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_portable_test.cmake)
 
+    add_executable(nesting_tests tests/nesting_tests.cpp ${INPUT_TEST_SOURCES})
+    target_include_directories(nesting_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(nesting_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
+    target_compile_definitions(nesting_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
+        TINTA_DEEP_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/deep-nesting.md")
+    add_test(NAME deep_nesting COMMAND nesting_tests)
+
     add_executable(code_block_layout_tests tests/code_block_layout_tests.cpp ${INPUT_TEST_SOURCES})
     target_include_directories(code_block_layout_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(code_block_layout_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)

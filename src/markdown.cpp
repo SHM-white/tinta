@@ -49,6 +49,21 @@ bool fileRefIsExternal(const std::string& path) {
     return endsWithNoCase(path, ".pdf");
 }
 
+// Every walk over the tree (layout, exports, copy, even freeing it) goes
+// one call deeper per level, and lists or quotes nested about a thousand
+// deep overflowed the stack. Past kMaxBlockNesting a quote or list adds
+// no level: a quote's content joins the deepest open block and a nested
+// list's items join the deepest list. Spans and other HTML elements stop
+// nesting a little deeper, their text joining the enclosing element.
+constexpr size_t kMaxBlockNesting = 100;
+constexpr size_t kMaxNesting = kMaxBlockNesting + 32;
+
+static size_t treeDepth(const Element* elem) {
+    size_t depth = 0;
+    for (; elem && elem->parent; elem = elem->parent) depth++;
+    return depth;
+}
+
 // Parser context for MD4C callbacks
 struct ParserContext {
     ElementPtr root;
@@ -65,6 +80,10 @@ struct ParserContext {
     // line by line, with each line break inside it as a "\n" piece of its
     // own, so a tag or comment spread over lines is only read whole.
     std::string pendingTag;
+    // One entry per quote or list, and per span, md4c opened: whether it
+    // added an element, so its leave pops only that (see kMaxBlockNesting)
+    std::vector<bool> nestPushed;
+    std::vector<bool> spanPushed;
 
     ParserContext() {
         root = std::make_shared<Element>(ElementType::Document);
@@ -76,11 +95,14 @@ struct ParserContext {
     }
 
     void pushElement(ElementPtr elem) {
-        if (Element* parent = current()) {
-            elem->parent = parent;
-            parent->children.push_back(elem);
-            elementStack.push(elem.get());
-        }
+        if (Element* parent = current()) pushElementInto(std::move(elem), parent);
+    }
+
+    // Opens elem as a child of parent rather than of the open element
+    void pushElementInto(ElementPtr elem, Element* parent) {
+        elem->parent = parent;
+        parent->children.push_back(elem);
+        elementStack.push(elem.get());
     }
 
     void popElement() {
@@ -214,19 +236,24 @@ static int enterBlockCallback(MD_BLOCKTYPE type, void* detail, void* userdata) {
         }
 
         case MD_BLOCK_QUOTE:
+            // Too deep, a quote adds no level: its content joins the
+            // deepest open block
+            ctx->nestPushed.push_back(treeDepth(ctx->current()) < kMaxBlockNesting);
+            if (!ctx->nestPushed.back()) return 0;
             elem = std::make_shared<Element>(ElementType::BlockQuote);
             break;
 
         case MD_BLOCK_UL:
-            elem = std::make_shared<Element>(ElementType::List);
-            elem->ordered = false;
-            break;
-
         case MD_BLOCK_OL: {
-            auto* ol = static_cast<MD_BLOCK_OL_DETAIL*>(detail);
+            // Too deep, a list nested in an item adds no level: its items
+            // join the item's own list (MD_BLOCK_LI)
+            Element* open = ctx->current();
+            ctx->nestPushed.push_back(!(open && open->type == ElementType::ListItem &&
+                                        treeDepth(open) >= kMaxBlockNesting));
+            if (!ctx->nestPushed.back()) return 0;
             elem = std::make_shared<Element>(ElementType::List);
-            elem->ordered = true;
-            elem->start = ol->start;
+            elem->ordered = type == MD_BLOCK_OL;
+            if (elem->ordered) elem->start = static_cast<MD_BLOCK_OL_DETAIL*>(detail)->start;
             break;
         }
 
@@ -237,6 +264,12 @@ static int enterBlockCallback(MD_BLOCKTYPE type, void* detail, void* userdata) {
                 elem->isTask = true;
                 elem->taskChecked = (li->task_mark == 'x' || li->task_mark == 'X');
                 elem->taskMarkOffset = li->task_mark_offset;
+            }
+            // An item whose list added no level follows the open item
+            Element* open = ctx->current();
+            if (open && open->type == ElementType::ListItem && open->parent) {
+                ctx->pushElementInto(elem, open->parent);
+                return 0;
             }
             break;
         }
@@ -296,6 +329,14 @@ static int leaveBlockCallback(MD_BLOCKTYPE type, void* /*detail*/, void* userdat
         case MD_BLOCK_THEAD:
         case MD_BLOCK_TBODY:
             return 0;
+        case MD_BLOCK_QUOTE:
+        case MD_BLOCK_UL:
+        case MD_BLOCK_OL: {
+            const bool pushed = ctx->nestPushed.empty() || ctx->nestPushed.back();
+            if (!ctx->nestPushed.empty()) ctx->nestPushed.pop_back();
+            if (pushed) ctx->popElement();
+            break;
+        }
         case MD_BLOCK_HTML: {
             // Parse HTML content and convert to elements
             Element* htmlBlock = ctx->current();
@@ -368,7 +409,9 @@ static int enterSpanCallback(MD_SPANTYPE type, void* detail, void* userdata) {
             return 0;
     }
 
-    if (elem) {
+    // Too deep, a span adds no level: its text joins the enclosing one
+    ctx->spanPushed.push_back(treeDepth(ctx->current()) < kMaxNesting);
+    if (ctx->spanPushed.back()) {
         ctx->pushElement(elem);
     }
     return 0;
@@ -386,10 +429,13 @@ static int leaveSpanCallback(MD_SPANTYPE type, void* /*detail*/, void* userdata)
         case MD_SPAN_A:
         case MD_SPAN_IMG:
         case MD_SPAN_LATEXMATH:
-        case MD_SPAN_LATEXMATH_DISPLAY:
+        case MD_SPAN_LATEXMATH_DISPLAY: {
             ctx->closeHtmlSpans();
-            ctx->popElement();
+            const bool pushed = ctx->spanPushed.empty() || ctx->spanPushed.back();
+            if (!ctx->spanPushed.empty()) ctx->spanPushed.pop_back();
+            if (pushed) ctx->popElement();
             break;
+        }
         default:
             break;
     }
@@ -572,6 +618,8 @@ static void inlineHtml(ParserContext* ctx, const MD_CHAR* text, MD_SIZE size) {
         bool closing = false;
         if (htmlSpanTag(text, size, spanType, closing)) {
             if (!closing) {
+                // Too deep, the tag adds no level (see kMaxNesting)
+                if (treeDepth(ctx->current()) >= kMaxNesting) return;
                 ctx->flushText();
                 auto elem = std::make_shared<Element>(spanType);
                 ctx->pushElement(elem);
@@ -1699,11 +1747,32 @@ static void pruneEmptyWrappers(Element* elem) {
                          elem->children.end());
 }
 
+// The tags parseHtmlIntoElements opens an element for. Lists and quotes
+// nest as blocks (kMaxBlockNesting), the rest as spans (kMaxNesting).
+static bool htmlTagNests(const std::string& name, bool& block) {
+    static const char* const kBlocks[] = {"ul", "ol", "li", "blockquote"};
+    static const char* const kOthers[] = {
+        "p", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "a", "strong", "b", "em", "i", "code",
+        "sub", "sup", "ins", "u", "del", "s", "strike", "mark", "ruby", "rt"};
+    for (const char* tag : kBlocks)
+        if (name == tag) return block = true;
+    block = false;
+    for (const char* tag : kOthers)
+        if (name == tag) return true;
+    return false;
+}
+
 void parseHtmlIntoElements(const std::string& html, Element* parent) {
     if (!parent) return;
 
     std::stack<Element*> elementStack;
     elementStack.push(parent);
+    // Every element opens on the top of the stack, so the stack tells the
+    // open element's depth in the document
+    const size_t baseDepth = treeDepth(parent);
+    auto openDepth = [&] { return baseDepth + elementStack.size() - 1; };
+    // Opening tags too deep to nest, per name: their close tags close nothing
+    std::unordered_map<std::string, size_t> flattened;
 
     size_t pos = 0;
     std::string textBuffer;
@@ -1780,6 +1849,24 @@ void parseHtmlIntoElements(const std::string& html, Element* parent) {
         std::string tagStr = html.substr(tagStart, tagEnd - tagStart + 1);
         HtmlTag tag = parseTag(tagStr);
 
+        // Too deep, an opening tag adds no level: its content joins the
+        // open element. A new <li> first ends the open item (below), so the
+        // items of a list nested too deep go on in the deepest list.
+        bool block = false;
+        if (tag.isClosing) {
+            auto skipped = flattened.find(tag.name);
+            if (skipped != flattened.end() && skipped->second > 0) {
+                skipped->second--;
+                pos = tagEnd + 1;
+                continue;
+            }
+        } else if (tag.name != "li" && !tag.isSelfClosing && htmlTagNests(tag.name, block) &&
+                   openDepth() >= (block ? kMaxBlockNesting : kMaxNesting)) {
+            flattened[tag.name]++;
+            pos = tagEnd + 1;
+            continue;
+        }
+
         // Handle different tags
         if (tag.name == "ul" || tag.name == "ol") {
             if (!tag.isClosing) {
@@ -1804,6 +1891,13 @@ void parseHtmlIntoElements(const std::string& html, Element* parent) {
                         closeElement(ElementType::ListItem, false, ElementType::ListItem);
                         break;
                     }
+                }
+                // An item still too deep adds no level either; one level
+                // more than a list, so the deepest list keeps its items
+                if (openDepth() > kMaxBlockNesting) {
+                    flattened["li"]++;
+                    pos = tagEnd + 1;
+                    continue;
                 }
                 auto elem = std::make_shared<Element>(ElementType::ListItem);
                 elem->parent = elementStack.top();
