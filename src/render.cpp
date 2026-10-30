@@ -1164,10 +1164,7 @@ static const ElementPtr* soleMathDisplayChild(const ElementPtr& elem) {
     return found;
 }
 
-// Inline content of nothing but empty anchors (<a id="x"></a> on its own
-// line above a heading) only marks link targets. Like a browser's empty
-// paragraph it takes no room; the targets pin to where it would start (#255).
-static bool pinAnchorsOnly(App& app, const std::vector<ElementPtr>& children, float y) {
+static bool isAnchorOnlyContent(const std::vector<ElementPtr>& children) {
     bool anchor = false;
     for (const auto& child : children) {
         if (!child) continue;
@@ -1181,7 +1178,14 @@ static bool pinAnchorsOnly(App& app, const std::vector<ElementPtr>& children, fl
             return false;
         }
     }
-    if (!anchor) return false;
+    return anchor;
+}
+
+// Inline content of nothing but empty anchors (<a id="x"></a> on its own
+// line above a heading) only marks link targets. Like a browser's empty
+// paragraph it takes no room; the targets pin to where it would start (#255).
+static bool pinAnchorsOnly(App& app, const std::vector<ElementPtr>& children, float y) {
+    if (!isAnchorOnlyContent(children)) return false;
     for (const auto& child : children) {
         if (child && child->type == ElementType::Anchor) {
             app.htmlAnchors.push_back({child->title, y});
@@ -2766,6 +2770,56 @@ static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float i
     app.layoutRects.push_back({D2D1::RectF(indent, startY, indent + 4, std::min(y, contentBottom)), barColor});
 }
 
+static bool isListInlineElement(ElementType type) {
+    switch (type) {
+        case ElementType::Text:
+        case ElementType::Code:
+        case ElementType::Emphasis:
+        case ElementType::Strong:
+        case ElementType::Link:
+        case ElementType::Image:
+        case ElementType::SoftBreak:
+        case ElementType::HardBreak:
+        case ElementType::Ruby:
+        case ElementType::RubyText:
+        case ElementType::Anchor:
+        case ElementType::FootnoteReference:
+        case ElementType::FootnoteBacklink:
+        case ElementType::Highlight:
+        case ElementType::Superscript:
+        case ElementType::Subscript:
+        case ElementType::Strikethrough:
+        case ElementType::Underline:
+        case ElementType::MathInline:
+            return true;
+        case ElementType::MathDisplay:
+            // Tight lists expose $$...$$ directly; route it through inline layout.
+            return true;
+        default:
+            return false;
+    }
+}
+
+// HTML wrappers and anchor-only content do not determine a list marker's baseline.
+static const Element* firstListContent(const std::vector<ElementPtr>& children) {
+    for (size_t i = 0; i < children.size();) {
+        const auto& child = children[i];
+        if (isListInlineElement(child->type)) {
+            std::vector<ElementPtr> inlineElements;
+            do {
+                inlineElements.push_back(children[i++]);
+            } while (i < children.size() && isListInlineElement(children[i]->type));
+            if (!isAnchorOnlyContent(inlineElements)) return inlineElements.front().get();
+        } else {
+            ++i;
+            if (child->type == ElementType::Paragraph && isAnchorOnlyContent(child->children)) continue;
+            if (child->type != ElementType::HtmlBlock) return child.get();
+            if (const auto* first = firstListContent(child->children)) return first;
+        }
+    }
+    return nullptr;
+}
+
 static void layoutList(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     float scale = app.contentScale * app.zoomFactor;
     float listIndent = 24.0f * scale;
@@ -2780,6 +2834,8 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
     for (const auto& child : elem->children) {
         if (child->type != ElementType::ListItem) continue;
 
+        const LayoutSnapshot markerStart = takeSnapshot(app);
+        size_t markerIndex = SIZE_MAX;
         size_t listItem = app.docListItems.size();
         app.docListItems.push_back({app.docText.size(), app.docText.size(), listDepth - 1,
                                     elem->ordered, itemNum,
@@ -2825,48 +2881,67 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
             LayoutInfo info = createLayout(app, marker, app.textFormat, 24.0f, app.bodyTypography);
             D2D1_POINT_2F pos = D2D1::Point2F(indent, y);
             D2D1_RECT_F bounds = D2D1::RectF(indent, y, indent + listIndent, y + 24);
+            if (info.layout) markerIndex = app.layoutTextRuns.size();
             addTextRun(app, std::move(info), pos, bounds, app.theme.text, 0, 0, false);
         }
 
-        bool hasBlockChildren = false;
+        const LayoutSnapshot contentStart = takeSnapshot(app);
+        const size_t headingStart = app.headings.size();
+        float itemStartY = y;
+
+        // MD4C omits paragraph wrappers in tight lists.
+        // Hence list items can mix direct inline children with block children.
+        std::vector<ElementPtr> inlineElements;
         for (const auto& itemChild : child->children) {
-            if (itemChild->type == ElementType::Paragraph ||
-                itemChild->type == ElementType::List ||
-                itemChild->type == ElementType::CodeBlock ||
-                itemChild->type == ElementType::BlockQuote) {
-                hasBlockChildren = true;
-                break;
+            if (isListInlineElement(itemChild->type)) {
+                inlineElements.push_back(itemChild);
+            } else {
+                if (!inlineElements.empty()) {
+                    if (!pinAnchorsOnly(app, inlineElements, y)) {
+                        layoutInlineContent(app, inlineElements, indent + listIndent, y,
+                            maxWidth - listIndent, app.textFormat, app.theme.text);
+                        // The item's text ends its line before a nested list, as
+                        // on screen (a copy read "Water it.morning")
+                        app.docText += L"\n";
+                    }
+                    inlineElements.clear();
+                }
+                layoutElement(app, itemChild, y, indent + listIndent, maxWidth - listIndent);
             }
         }
-
-        float itemStartY = y;
-        if (hasBlockChildren) {
-            std::vector<ElementPtr> inlineElements, blockElements;
-            for (const auto& itemChild : child->children) {
-                if (itemChild->type == ElementType::Paragraph ||
-                    itemChild->type == ElementType::List ||
-                    itemChild->type == ElementType::CodeBlock ||
-                    itemChild->type == ElementType::BlockQuote) {
-                    blockElements.push_back(itemChild);
-                } else {
-                    inlineElements.push_back(itemChild);
-                }
-            }
-
-            if (!inlineElements.empty()) {
-                layoutInlineContent(app, inlineElements, indent + listIndent, y,
-                    maxWidth - listIndent, app.textFormat, app.theme.text);
-                // The item's text ends its line before a nested list, as
-                // on screen (a copy read "Water it.morning")
-                app.docText += L"\n";
-            }
-
-            for (const auto& blockChild : blockElements) {
-                layoutElement(app, blockChild, y, indent + listIndent, maxWidth - listIndent);
-            }
-        } else {
-            layoutInlineContent(app, child->children, indent + listIndent, y,
+        if (!inlineElements.empty() && !pinAnchorsOnly(app, inlineElements, y)) {
+            layoutInlineContent(app, inlineElements, indent + listIndent, y,
                 maxWidth - listIndent, app.textFormat, app.theme.text);
+        }
+
+        const auto* first = firstListContent(child->children);
+        if (headingStart < app.headings.size() && first && first->type == ElementType::Heading) {
+            // Move only the marker: keep heading margins and align to the main
+            // text baseline, even when the heading starts with a raised script.
+            auto format = app.headingFormats[first->level - 1];
+            float headingBaseline = app.headings[headingStart].y + formatBaseline(app, format ? format : app.textFormat);
+            if (child->isTask) {
+                float shift = headingBaseline - itemStartY - formatBaseline(app, app.textFormat);
+                // Move only this checkbox, including its hit region; nested content stays put.
+                for (size_t i = markerStart.rects; i < contentStart.rects; ++i) {
+                    app.layoutRects[i].rect.top += shift;
+                    app.layoutRects[i].rect.bottom += shift;
+                }
+                for (size_t i = markerStart.lines; i < contentStart.lines; ++i) {
+                    app.layoutLines[i].p1.y += shift;
+                    app.layoutLines[i].p2.y += shift;
+                }
+                for (size_t i = markerStart.tasks; i < contentStart.tasks; ++i) {
+                    app.taskRects[i].rect.top += shift;
+                    app.taskRects[i].rect.bottom += shift;
+                }
+            } else if (markerIndex < app.layoutTextRuns.size()) {
+                auto& marker = app.layoutTextRuns[markerIndex];
+                float shift = headingBaseline - marker.pos.y - layoutBaseline(marker.layout);
+                marker.pos.y += shift;
+                marker.bounds.top += shift;
+                marker.bounds.bottom += shift;
+            }
         }
 
         if (listItem < app.docListItems.size()) app.docListItems[listItem].end = app.docText.size();

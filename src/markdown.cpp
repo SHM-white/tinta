@@ -1796,6 +1796,15 @@ void parseHtmlIntoElements(const std::string& html, Element* parent) {
         else if (tag.name == "li") {
             if (!tag.isClosing) {
                 flushText();
+                // A new <li> implicitly ends the previous item, including
+                // unclosed spans, but must not cross a nested list boundary.
+                for (Element* open = elementStack.top(); open && open != parent; open = open->parent) {
+                    if (open->type == ElementType::List) break;
+                    if (open->type == ElementType::ListItem) {
+                        closeElement(ElementType::ListItem, false, ElementType::ListItem);
+                        break;
+                    }
+                }
                 auto elem = std::make_shared<Element>(ElementType::ListItem);
                 elem->parent = elementStack.top();
                 elementStack.top()->children.push_back(elem);

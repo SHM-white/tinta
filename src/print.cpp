@@ -204,6 +204,9 @@ std::vector<float> computePageBreaks(const App& app, float pageContentH) {
                 }
             };
             for (const auto& line : app.lineBuckets) consider(line.top, line.bottom);
+            // List markers have no selection line bucket. Protect every text
+            // run so it cannot straddle a cut and be replayed on both pages.
+            for (const auto& run : app.layoutTextRuns) consider(run.bounds.top, run.bounds.bottom);
             for (const auto& bmp : app.layoutBitmaps) consider(bmp.destRect.top, bmp.destRect.bottom);
             for (const auto& shape : app.layoutShapes) consider(shape.rect.top, shape.rect.bottom);
             // Shrink bands page-break as a unit: a scaled diagram split
