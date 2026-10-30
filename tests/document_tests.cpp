@@ -1,7 +1,11 @@
 #include "document.h"
 
+#include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
+#include <string>
+#include <utility>
 
 namespace {
 
@@ -11,6 +15,50 @@ void check(bool condition, const char* message) {
     if (condition) return;
     std::cerr << "FAIL: " << message << '\n';
     failures++;
+}
+
+std::string readFile(const char* path) {
+    std::ifstream file(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+}
+
+// The text with every line break written as `eol`
+std::string withEol(const std::string& text, const std::string& eol) {
+    std::string out;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\r' && i + 1 < text.size() && text[i + 1] == '\n') continue;
+        if (text[i] == '\n') out += eol;
+        else out += text[i];
+    }
+    return out;
+}
+
+// The parsed tree as text, every source offset taken `shift` bytes back:
+// a document behind a byte order mark dumps at 3 as it does at 0 without
+std::string dumpTree(const qmd::ElementPtr& root, size_t shift) {
+    std::string out;
+    auto at = [&](size_t offset) {
+        return offset == SIZE_MAX ? std::string("-")
+                                  : std::to_string((long long)offset - (long long)shift);
+    };
+    std::function<void(const qmd::ElementPtr&, int)> walk =
+        [&](const qmd::ElementPtr& e, int depth) {
+        out += std::string(depth * 2, ' ') + qmd::elementTypeToString(e->type) +
+               " @" + at(e->sourceOffset) + " level=" + std::to_string(e->level) +
+               " list=" + std::to_string(e->ordered) + "/" + std::to_string(e->start) +
+               " task=" + std::to_string(e->isTask) + std::to_string(e->taskChecked) +
+               "@" + at(e->taskMarkOffset) + " lang=" + e->language +
+               " align=" + std::to_string(e->align) + " cols=" + std::to_string(e->col_count) +
+               " alert=" + std::to_string(e->alertKind) + " url=" + e->url +
+               " title=" + e->title + " text=[" + e->text + "]\n";
+        for (const auto& p : e->properties) {
+            out += std::string(depth * 2 + 2, ' ') + p.key + "=" + p.text + " @" +
+                   at(p.valueStart) + "-" + at(p.valueEnd) + "\n";
+        }
+        for (const auto& child : e->children) walk(child, depth + 1);
+    };
+    if (root) walk(root, 0);
+    return out;
 }
 
 } // namespace
@@ -445,6 +493,66 @@ int main() {
               "inline code shortcodes untouched");
         check(codeFlat.find(":fire:") != std::string::npos,
               "fenced code shortcodes untouched");
+    }
+
+    // A UTF-8 byte order mark (EF BB BF), as Windows PowerShell 5.1's
+    // Set-Content -Encoding utf8 and Visual Studio write it, is not text:
+    // the document parses as it does without one, its first line included,
+    // and every source offset still counts the mark's three bytes
+    {
+        const std::string bom = "\xEF\xBB\xBF";
+        const std::string fixture = readFile(TINTA_BOM_FIXTURE);
+        const std::string frontMatter = readFile(TINTA_BOM_FRONTMATTER_FIXTURE);
+        check(fixture.rfind(bom, 0) == 0 && frontMatter.rfind(bom, 0) == 0,
+              "the byte order mark fixtures start with the mark");
+
+        auto titled = parseDocument(parser, fixture, "bom.md");
+        check(titled.success && !titled.root->children.empty() &&
+                  titled.root->children[0]->type == qmd::ElementType::Heading &&
+                  titled.root->children[0]->level == 1 &&
+                  !titled.root->children[0]->children.empty() &&
+                  titled.root->children[0]->children[0]->text == "Byte order mark" &&
+                  titled.root->children[0]->sourceOffset == bom.size() + 2,
+              "the first line after the mark is a heading, its text 5 bytes in");
+        auto withProperties = parseDocument(parser, frontMatter, L"bom.md");
+        check(withProperties.success && withProperties.root->children.size() > 1 &&
+                  withProperties.root->children[0]->type == qmd::ElementType::Properties &&
+                  withProperties.root->children[1]->type == qmd::ElementType::Heading,
+              "front matter after the mark becomes properties, the heading right after");
+
+        const std::pair<const char*, std::string> cases[] = {
+            {"the mixed fixture", fixture.substr(bom.size())},
+            {"the front matter fixture", frontMatter.substr(bom.size())},
+            {"a fence on the first line", "```js\n   indented()\n```\n"},
+            {"a list item and its continuation", "- item\n\n  continued\n"},
+            {"a table on the first line", "| a | b |\n| --- | --- |\n| 1 | 2 |\n"},
+            {"a footnote defined on the first line", "[^1]: The note.\n\nText with a note[^1].\n"},
+            {"raw HTML on the first line", "<div>\n\n**HTML block**\n\n</div>\n"},
+            {"a bare www link on the first line", "www.example.com\n"},
+            {"a task on the first line", "- [ ] first\n- [x] second\n"},
+            {"nothing after the mark", ""},
+        };
+        for (const auto& [name, text] : cases) {
+            for (const char* eol : {"\n", "\r\n"}) {
+                const std::string source = withEol(text, eol);
+                auto plain = parseDocument(parser, source, "bom.md");
+                auto marked = parseDocument(parser, bom + source, L"bom.md");
+                const std::string message = std::string(name) +
+                    (eol[1] ? " (CRLF)" : " (LF)") +
+                    " parses as without the mark, every offset 3 bytes on";
+                check(plain.success && marked.success &&
+                          dumpTree(marked.root, bom.size()) == dumpTree(plain.root, 0),
+                      message.c_str());
+            }
+        }
+
+        // Only the first three bytes are the mark: the same character
+        // further on is text, as it always was
+        auto inner = parseDocument(parser, "a" + bom + "b\n", "bom.md");
+        check(inner.success && inner.root->children.size() == 1 &&
+                  !inner.root->children[0]->children.empty() &&
+                  inner.root->children[0]->children[0]->text == "a" + bom + "b",
+              "a zero width no-break space inside the text stays");
     }
 
     if (failures != 0) {

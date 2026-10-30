@@ -203,6 +203,7 @@ int runReadingPositionTests(const char* file);
 int runSplitScrollbarTests(const char* file, const char* frontMatterFile);
 int runEditorDragTests(const char* file);
 int runTouchTests(const char* file);
+int runByteOrderMarkTests(const char* file, const char* frontMatterFile);
 
 int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--deleted-tab-tests") return runDeletedTabTests();
@@ -217,6 +218,8 @@ int main(int argc, char** argv) {
         return runSplitScrollbarTests(argv[2], argc == 4 ? argv[3] : nullptr);
     if (argc == 3 && std::string(argv[1]) == "--touch-tests") return runTouchTests(argv[2]);
     if (argc == 3 && std::string(argv[1]) == "--editor-drag-tests") return runEditorDragTests(argv[2]);
+    if (argc == 4 && std::string(argv[1]) == "--byte-order-mark-tests")
+        return runByteOrderMarkTests(argv[2], argv[3]);
     if (argc == 2 && std::string(argv[1]) == "--window-drag-tests") return runWindowDragTests();
     if (argc == 2 && std::string(argv[1]) == "--table-layout-tests") return runTableLayoutTests();
     if (argc == 2 && std::string(argv[1]) == "--highlight-layout-tests") return runHighlightLayoutTests();

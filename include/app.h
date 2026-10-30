@@ -535,6 +535,7 @@ struct App {
         std::optional<std::string> viewerSource;
         FILETIME lastWrite{};      // for external-change conflicts (dirty tabs)
         std::wstring editorText;   // parked edit buffer (editMode only)
+        bool editorBom = false;    // its file starts with a byte order mark
         float editorScrollY = 0.0f;
         size_t editorCursor = 0;
         bool wordWrap = true;
@@ -1421,6 +1422,9 @@ struct App {
     // Editor document
     std::wstring editorText;
     bool editorDirty = false;
+    // The file starts with a UTF-8 byte order mark. The mark stays out of
+    // editorText, so the caret never sits before it, and saves write it back.
+    bool editorBom = false;
     std::vector<size_t> editorLineStarts;
     float editorScrollX = 0.0f;  // horizontal scroll, non-wrap mode only (#77)
 

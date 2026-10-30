@@ -1487,7 +1487,11 @@ static void enterEditModeWithContent(App& app, const std::string& content,
     app.editorExtraCarets.clear();
     app.editorDocCountsStale = true;
     app.editorSelCountsKey.clear();
-    app.editorText = fromUtf8(content);
+    // A byte order mark belongs to the file, not the text: nothing typed
+    // can land ahead of it, and writeEditorFile puts it back. The walks
+    // below still count its bytes, as the reading view's offsets do.
+    app.editorBom = startsWithUtf8Bom(content);
+    app.editorText = fromUtf8(content.substr(app.editorBom ? UTF8_BOM.size() : 0));
     // Normalize \r\n to \n
     std::wstring normalized;
     normalized.reserve(app.editorText.size());
@@ -1609,8 +1613,10 @@ void editorScrollToSourceOffset(App& app, size_t byteOffset) {
 }
 
 void restoreEditBuffer(App& app, const std::wstring& text, bool dirty,
-                       float scrollY, size_t cursor) {
-    enterEditModeWithContent(app, toUtf8(text), false);
+                       float scrollY, size_t cursor, bool bom) {
+    std::string content = toUtf8(text);
+    if (bom) content.insert(0, UTF8_BOM);
+    enterEditModeWithContent(app, content, false);
     app.editorDirty = dirty;
     app.editorCursorPos = std::min(cursor, app.editorText.size());
     app.editorScrollY = std::max(0.0f, scrollY);
@@ -2127,6 +2133,8 @@ static void writeEditorFile(App& app, HWND hwnd) {
         }
         utf8 = std::move(crlf);
     }
+    // The byte order mark the file was opened with goes back in front
+    if (app.editorBom) utf8.insert(0, UTF8_BOM);
 
     std::ofstream out(widePath, std::ios::binary);
     if (out) {
