@@ -10,6 +10,7 @@
 #include <set>
 
 #include "editor.h"
+#include "link_target.h"
 #include "math_render.h"
 #include "mermaid_ext.h"
 #include "plantuml.h"
@@ -890,13 +891,14 @@ void walkInline(DocxCtx& ctx, const ElementPtr& elem, RunProps props,
             int width = 0, height = 0;
             std::string extension;
             if (!remote) {
-                std::wstring widePath = toWide(src);
+                const std::string localPath = decodeLinkComponent(src);
+                std::wstring widePath = toWide(localPath);
                 if (widePath.size() < 2 || widePath[1] != L':') {
                     widePath = ctx.baseDir + L"\\" + widePath;
                 }
-                size_t dot = src.find_last_of('.');
+                size_t dot = localPath.find_last_of('.');
                 if (dot != std::string::npos) {
-                    extension = src.substr(dot + 1);
+                    extension = localPath.substr(dot + 1);
                     for (char& c : extension) {
                         c = (char)tolower((unsigned char)c);
                     }

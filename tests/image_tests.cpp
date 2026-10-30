@@ -1,4 +1,5 @@
 #include "d2d_init.h"
+#include "export.h"
 #include "image_loader.h"
 #include "input.h"
 #include "overlays.h"
@@ -196,6 +197,56 @@ void mixedLayout(App& app) {
     drawImages(app);
 }
 
+// #293: decode local image destinations once, including UTF-8 bytes, while
+// preserving literal plus signs, malformed escapes and encoded NULs.
+void encodedImagePaths(App& app) {
+    std::ifstream file(TINTA_ENCODED_IMAGE_FIXTURE, std::ios::binary);
+    const std::string source((std::istreambuf_iterator<char>(file)), {});
+    check(!source.empty(), "encoded image fixture is readable");
+    app.clearLayoutCache();
+    app.releaseImageCache();
+    app.currentFile = TINTA_ENCODED_IMAGE_FIXTURE;
+    app.root = app.parser.parse(source).root;
+    app.contentScale = 1.0f;
+    updateTextFormats(app);
+    for (int width : {1050, 650}) {
+        app.width = width;
+        layoutDocument(app);
+        ensureLayoutComplete(app);
+        check(app.layoutBitmaps.size() == 9, "all nine local image destinations render");
+        check(app.tableRects.size() == 1 && app.codeBlocks.size() == 1 &&
+              app.docText.find(L"Surrounding content survives.") != std::wstring::npos,
+              "encoded images preserve mixed document content");
+        check(app.docText.find(L"[image:") == std::wstring::npos,
+              "valid encoded images never fall back to alt text");
+        drawImages(app);
+    }
+
+    check(exportHtmlFile(app, L"encoded-images.html"), "encoded image HTML export succeeds");
+    std::ifstream htmlFile("encoded-images.html", std::ios::binary);
+    const std::string html((std::istreambuf_iterator<char>(htmlFile)), {});
+    size_t images = 0;
+    for (size_t pos = 0; (pos = html.find("<img src=\"data:image/png;base64,", pos)) != std::string::npos; ++pos)
+        ++images;
+    check(images == 9, "HTML embeds every encoded local PNG, including an encoded extension");
+
+    check(exportDocxFile(app, L"encoded-images.docx"), "encoded image Word export succeeds");
+    std::ifstream docxFile("encoded-images.docx", std::ios::binary);
+    const std::string docx((std::istreambuf_iterator<char>(docxFile)), {});
+    images = 0;
+    for (size_t pos = 0; (pos = docx.find("<w:drawing>", pos)) != std::string::npos; ++pos)
+        ++images;
+    check(images == 9, "Word embeds every encoded local PNG");
+
+    const std::string remote = "https://example.com/folder%20with%20space/image%2520.png";
+    app.root = app.parser.parse("![Remote](" + remote + ")\n").root;
+    check(exportHtmlFile(app, L"remote-encoded-image.html"), "remote image HTML export succeeds");
+    std::ifstream remoteFile("remote-encoded-image.html", std::ios::binary);
+    const std::string remoteHtml((std::istreambuf_iterator<char>(remoteFile)), {});
+    check(remoteHtml.find("<img src=\"" + remote + "\"") != std::string::npos,
+          "remote image URLs retain their original percent encoding");
+}
+
 // Hover, press and release through the real handlers, as a separate click
 // rather than the second half of a double-click
 void click(App& app, float x, float y) {
@@ -274,6 +325,7 @@ int runImageTests(const char* remoteBase) {
     ownership(app);
     mixedLayout(app);
     lightboxDismissal(app);
+    encodedImagePaths(app);
     if (remoteBase) remoteImages(app, remoteBase);
     DestroyWindow(app.hwnd);
     app.hwnd = nullptr;
