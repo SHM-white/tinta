@@ -9,6 +9,7 @@
 #include "mermaid_ext.h"
 #include "math_render.h"
 #include "image_loader.h"
+#include "link_target.h"
 #include "plantuml_app.h"
 #include "plantuml_queue.h"
 
@@ -3109,7 +3110,9 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
         // Resolve relative to the current file's directory. Both strings are
         // UTF-8 and must be widened explicitly: a narrow filesystem::path
         // decodes through the ANSI codepage and mangles non-ASCII paths (#87)
-        std::wstring wsrc = toWide(src);
+        // Decode URL escapes once before converting UTF-8 to a native path
+        // (#293). Remote URLs above retain their original encoding.
+        std::wstring wsrc = toWide(qmd::decodeLinkComponent(src));
         if (!app.currentFile.empty()) {
             std::filesystem::path basePath(toWide(app.currentFile));
             std::filesystem::path imgPath = basePath.parent_path() / wsrc;
