@@ -63,8 +63,9 @@ Evidence is in `out/check-1030/nest/`, `deep-before/`, `deep-fixed/` and
 - Deep lists and quotes still lay out as narrowing columns, as before: past
   about 25 levels at print width each level's text draws a character per
   line at the right edge. Nothing real nests that deep.
-- Raw HTML `<blockquote>` around bare text draws nothing at any depth, before
-  and after the fix; the fixture puts its deep quote's text in a `<p>`.
+- Raw HTML `<blockquote>` around bare text drew nothing at any depth, before
+  and after the fix, so the fixture puts its deep quote's text in a `<p>`;
+  the fix that followed is in `html-blockquote-text-validation.md`.
 - Past the limit, raw HTML that goes on inside an item after its nested
   list can land one level up, and an ordered list's flattened items continue
   its numbering.

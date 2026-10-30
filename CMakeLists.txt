@@ -399,7 +399,8 @@ if(BUILD_TESTING)
     target_include_directories(blockquote_layout_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(blockquote_layout_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
     target_compile_definitions(blockquote_layout_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
-        TINTA_QUOTE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/blockquote-spacing.md")
+        TINTA_QUOTE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/blockquote-spacing.md"
+        TINTA_HTML_QUOTE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/html-blockquote-text.md")
     add_test(NAME blockquote_layout COMMAND blockquote_layout_tests)
 
     add_executable(theme_tests tests/theme_tests.cpp tests/theme_colour_tests.cpp ${INPUT_TEST_SOURCES})

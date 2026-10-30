@@ -1209,6 +1209,19 @@ static void layoutParagraph(App& app, const ElementPtr& elem, float& y, float in
     y += 14 * scale;
 }
 
+// Inline content outside any paragraph, the bare text of a raw HTML block
+// or <blockquote>, lays out as a paragraph would. Empties the run.
+static void layoutInlineRun(App& app, std::vector<ElementPtr>& run, float& y, float indent, float maxWidth) {
+    if (run.empty()) return;
+    if (!pinAnchorsOnly(app, run, y)) {
+        layoutInlineContent(app, run, indent, y, maxWidth, app.textFormat, app.theme.text);
+        app.docText += L"\n\n";
+        float scale = app.contentScale * app.zoomFactor;
+        y += 14 * scale;
+    }
+    run.clear();
+}
+
 static void layoutHeading(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     float scale = app.contentScale * app.zoomFactor;
     int levelIndex = std::min(elem->level - 1, 5);
@@ -2710,6 +2723,36 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
     y += blockHeight + 14 * scale;
 }
 
+static bool isInlineElement(ElementType type) {
+    switch (type) {
+        case ElementType::Text:
+        case ElementType::Code:
+        case ElementType::Emphasis:
+        case ElementType::Strong:
+        case ElementType::Link:
+        case ElementType::Image:
+        case ElementType::SoftBreak:
+        case ElementType::HardBreak:
+        case ElementType::Ruby:
+        case ElementType::RubyText:
+        case ElementType::Anchor:
+        case ElementType::FootnoteReference:
+        case ElementType::FootnoteBacklink:
+        case ElementType::Highlight:
+        case ElementType::Superscript:
+        case ElementType::Subscript:
+        case ElementType::Strikethrough:
+        case ElementType::Underline:
+        case ElementType::MathInline:
+            return true;
+        case ElementType::MathDisplay:
+            // Tight lists expose $$...$$ directly; route it through inline layout.
+            return true;
+        default:
+            return false;
+    }
+}
+
 static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     float scale = app.contentScale * app.zoomFactor;
     float quoteIndent = 20.0f * scale;
@@ -2748,9 +2791,20 @@ static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float i
         y += 30 * scale;
     }
 
+    // A raw HTML quote can hold its text bare, with no <p> around it
+    // (<blockquote>Text <b>bold</b></blockquote>), and layoutElement drew
+    // nothing for it. Each run of inline children is a paragraph, in
+    // source order with the blocks around it.
+    std::vector<ElementPtr> inlineRun;
     for (const auto& child : elem->children) {
+        if (isInlineElement(child->type)) {
+            inlineRun.push_back(child);
+            continue;
+        }
+        layoutInlineRun(app, inlineRun, y, indent + quoteIndent, maxWidth - quoteIndent);
         layoutElement(app, child, y, indent + quoteIndent, maxWidth - quoteIndent);
     }
+    layoutInlineRun(app, inlineRun, y, indent + quoteIndent, maxWidth - quoteIndent);
 
     // Child layout advances y past its trailing margin. Keep that spacing
     // outside the bar, without moving the next block. Use retained content
@@ -2776,45 +2830,15 @@ static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float i
     app.layoutRects.push_back({D2D1::RectF(indent, startY, indent + 4, std::min(y, contentBottom)), barColor});
 }
 
-static bool isListInlineElement(ElementType type) {
-    switch (type) {
-        case ElementType::Text:
-        case ElementType::Code:
-        case ElementType::Emphasis:
-        case ElementType::Strong:
-        case ElementType::Link:
-        case ElementType::Image:
-        case ElementType::SoftBreak:
-        case ElementType::HardBreak:
-        case ElementType::Ruby:
-        case ElementType::RubyText:
-        case ElementType::Anchor:
-        case ElementType::FootnoteReference:
-        case ElementType::FootnoteBacklink:
-        case ElementType::Highlight:
-        case ElementType::Superscript:
-        case ElementType::Subscript:
-        case ElementType::Strikethrough:
-        case ElementType::Underline:
-        case ElementType::MathInline:
-            return true;
-        case ElementType::MathDisplay:
-            // Tight lists expose $$...$$ directly; route it through inline layout.
-            return true;
-        default:
-            return false;
-    }
-}
-
 // HTML wrappers and anchor-only content do not determine a list marker's baseline.
 static const Element* firstListContent(const std::vector<ElementPtr>& children) {
     for (size_t i = 0; i < children.size();) {
         const auto& child = children[i];
-        if (isListInlineElement(child->type)) {
+        if (isInlineElement(child->type)) {
             std::vector<ElementPtr> inlineElements;
             do {
                 inlineElements.push_back(children[i++]);
-            } while (i < children.size() && isListInlineElement(children[i]->type));
+            } while (i < children.size() && isInlineElement(children[i]->type));
             if (!isAnchorOnlyContent(inlineElements)) return inlineElements.front().get();
         } else {
             ++i;
@@ -2899,7 +2923,7 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
         // Hence list items can mix direct inline children with block children.
         std::vector<ElementPtr> inlineElements;
         for (const auto& itemChild : child->children) {
-            if (isListInlineElement(itemChild->type)) {
+            if (isInlineElement(itemChild->type)) {
                 inlineElements.push_back(itemChild);
             } else {
                 if (!inlineElements.empty()) {
@@ -3728,18 +3752,6 @@ static void layoutElement(App& app, const ElementPtr& elem, float& y, float inde
             // and inline elements (Text, Ruby, Link, etc.). Collect consecutive
             // inline children and render them through layoutInlineContent.
             std::vector<ElementPtr> inlineBuffer;
-            auto flushInline = [&]() {
-                if (pinAnchorsOnly(app, inlineBuffer, y)) {
-                    inlineBuffer.clear();
-                } else if (!inlineBuffer.empty()) {
-                    layoutInlineContent(app, inlineBuffer, indent, y, maxWidth,
-                                        app.textFormat, app.theme.text);
-                    app.docText += L"\n\n";
-                    float s = app.contentScale * app.zoomFactor;
-                    y += 14 * s;
-                    inlineBuffer.clear();
-                }
-            };
             for (const auto& child : elem->children) {
                 bool isBlock = (child->type == ElementType::Paragraph ||
                                 child->type == ElementType::Heading ||
@@ -3750,13 +3762,13 @@ static void layoutElement(App& app, const ElementPtr& elem, float& y, float inde
                                 child->type == ElementType::HtmlBlock ||
                                 child->type == ElementType::Table);
                 if (isBlock) {
-                    flushInline();
+                    layoutInlineRun(app, inlineBuffer, y, indent, maxWidth);
                     layoutElement(app, child, y, indent, maxWidth);
                 } else {
                     inlineBuffer.push_back(child);
                 }
             }
-            flushInline();
+            layoutInlineRun(app, inlineBuffer, y, indent, maxWidth);
             break;
         }
         default:

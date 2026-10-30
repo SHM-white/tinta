@@ -981,7 +981,8 @@ void walkInline(DocxCtx& ctx, const ElementPtr& elem, RunProps props,
     }
 }
 
-void emitParagraph(DocxCtx& ctx, const ElementPtr& elem,
+// One paragraph of inline content
+void emitInlineRun(DocxCtx& ctx, const std::vector<ElementPtr>& run,
                    const ParaProps& props) {
     ctx.body += "<w:p>" + paraPropsXml(props);
     RunProps runProps;
@@ -989,10 +990,43 @@ void emitParagraph(DocxCtx& ctx, const ElementPtr& elem,
         // Colored quote text rides on every run via the color override
         runProps.color = props.extraRunProps;
     }
-    for (const auto& child : elem->children) {
+    for (const auto& child : run) {
         walkInline(ctx, child, runProps, ctx.body);
     }
     ctx.body += "</w:p>";
+}
+
+void emitParagraph(DocxCtx& ctx, const ElementPtr& elem,
+                   const ParaProps& props) {
+    emitInlineRun(ctx, elem->children, props);
+}
+
+// Inline content that can stand in a block outside any paragraph
+bool isInlineElement(ElementType type) {
+    switch (type) {
+        case ElementType::Text:
+        case ElementType::Code:
+        case ElementType::Emphasis:
+        case ElementType::Strong:
+        case ElementType::Link:
+        case ElementType::Image:
+        case ElementType::SoftBreak:
+        case ElementType::HardBreak:
+        case ElementType::Ruby:
+        case ElementType::RubyText:
+        case ElementType::Anchor:
+        case ElementType::FootnoteReference:
+        case ElementType::FootnoteBacklink:
+        case ElementType::Highlight:
+        case ElementType::Superscript:
+        case ElementType::Subscript:
+        case ElementType::Strikethrough:
+        case ElementType::Underline:
+        case ElementType::MathInline:
+            return true;
+        default:
+            return false;
+    }
 }
 
 // Removes `dir` recursively, tolerating every failure: the export temp tree
@@ -1271,9 +1305,20 @@ void walkBlocks(DocxCtx& ctx, const ElementPtr& elem, ParaProps props,
                 quote.indentTwips = 240;
                 quote.extraRunProps = ctx.mutedHex;
             }
+            // The bare text of a raw HTML quote, with no <p> around it, and
+            // the inline tags beside it form one paragraph, as on screen.
+            // Taken one by one, each was a paragraph and bare text was lost.
+            std::vector<ElementPtr> run;
             for (const auto& child : elem->children) {
+                if (isInlineElement(child->type)) {
+                    run.push_back(child);
+                    continue;
+                }
+                if (!run.empty()) emitInlineRun(ctx, run, quote);
+                run.clear();
                 walkBlocks(ctx, child, quote, listDepth);
             }
+            if (!run.empty()) emitInlineRun(ctx, run, quote);
             break;
         }
         case ElementType::List: {
