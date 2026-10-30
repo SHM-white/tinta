@@ -77,6 +77,7 @@ It's a viewer first: perfect as the double-click default for `.md` and `.mmd` fi
 - **File references** - Plain-text paths like `docs/plan.md` become real links: live targets open as tabs, missing ones render as faded ghosts. Mouse back/forward (or Alt+arrows) walks your jumps with exact scroll restore
 - **Link peek** - Rest the pointer on a local `.md` or wiki link and the target appears fully rendered in a panel beside it, no tab opened
 - **Image lightbox** - Click any inline image to view it full size: wheel zooms, drag pans, Esc closes
+- **Other computers' shares stay closed** - An image or file link on another computer's share (`\\server\share\...`) opens only in a document from that same server; anywhere else the image shows a note instead, since opening the share would sign in to it with your Windows credentials. A share mapped to a drive letter opens like any local folder
 - **Copy tables as TSV** - Hover a table for a copy button that pastes into Excel or Sheets as a real grid
 - **Copy diagrams as images** - Hover a diagram for an Image button that puts a crisp 2x PNG on the clipboard
 - **Paste screenshots** - Ctrl+V a bitmap in edit mode and it saves as a PNG beside the document with the link inserted

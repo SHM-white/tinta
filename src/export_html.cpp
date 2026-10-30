@@ -10,6 +10,7 @@
 #include "file_utils.h"
 #include "i18n.h"
 #include "link_target.h"
+#include "network_path.h"
 #include "signals.h"
 #include "math_render.h"
 #include "mermaid.h"
@@ -1183,7 +1184,8 @@ void emitImage(ExportCtx& ctx, const ElementPtr& elem) {
         }
         std::string data;
         const char* mime = mimeForPath(localPath);
-        if (mime && readBinary(widePath, data)) {
+        // Another computer's share stays unopened, as in the viewer
+        if (mime && qmd::mayOpenFromDocument(widePath, ctx.baseDir) && readBinary(widePath, data)) {
             src = std::string("data:") + mime + ";base64," + base64(data);
         }
     }

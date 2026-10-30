@@ -9,7 +9,9 @@
 #include "mermaid_ext.h"
 #include "math_render.h"
 #include "image_loader.h"
+#include "i18n.h"
 #include "link_target.h"
+#include "network_path.h"
 #include "plantuml_app.h"
 #include "plantuml_queue.h"
 
@@ -2335,7 +2337,11 @@ static bool layoutMermaidExtDiagram(App& app, mermaidext::Kind kind,
     return true;
 }
 
-static App::ImageEntry& getOrLoadImage(App& app, const std::string& src);
+// A document's image is checked against the document's folder before it
+// opens (network_path.h); Tinta's own files, such as a rendered PlantUML
+// diagram, pass fromDocument = false
+static App::ImageEntry& getOrLoadImage(App& app, const std::string& src,
+                                       bool fromDocument = true);
 
 // UTF-8 form of a wide string (the PlantUML preamble and the image cache
 // key are narrow; render.cpp has no toUtf8 dependency)
@@ -2479,7 +2485,7 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
                 // the mermaid 2x convention); scaling is exact math, so a
                 // fit computes one scale instead of the 4-pass loop.
                 auto layOutPng = [&](const std::wstring& pngPath) -> bool {
-                    auto& image = getOrLoadImage(app, wideToUtf8(pngPath));
+                    auto& image = getOrLoadImage(app, wideToUtf8(pngPath), false);
                     if (image.failed || !image.bitmap) return false;
                     const float scale = app.contentScale * app.zoomFactor;
                     const bool fitActive = fitBlockEnabled(app, fitKey);
@@ -3146,7 +3152,7 @@ static bool loadSvgBitmap(App& app, const std::wstring& path,
     return !entry.failed;
 }
 
-static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
+static App::ImageEntry& getOrLoadImage(App& app, const std::string& src, bool fromDocument) {
     // Remote images load on a worker thread — a synchronous download here
     // stalled layout for seconds per unreachable URL (#44)
     bool isUrl = (src.rfind("http://", 0) == 0 || src.rfind("https://", 0) == 0);
@@ -3169,6 +3175,20 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
             folder = launchDirectory();
         }
         widePath = (std::filesystem::path(folder) / wsrc).wstring();
+    }
+
+    // A document opens images on this computer and on the server it came
+    // from, never another computer's share: Windows would sign in to that
+    // server with the user's credentials. Decided before the cache, so a
+    // file another document was allowed to open does not show here either.
+    if (fromDocument && !isUrl && !qmd::mayOpenFromDocument(widePath, folder)) {
+        static App::ImageEntry blocked = [] {
+            App::ImageEntry entry;
+            entry.failed = true;
+            entry.blocked = true;
+            return entry;
+        }();
+        return blocked;
     }
 
     // A local image is cached as the file it resolves to: documents in two
@@ -3230,8 +3250,8 @@ static void layoutImage(App& app, const ElementPtr& elem, float& y, float indent
     auto& entry = getOrLoadImage(app, elem->url);
 
     if (entry.failed || !entry.bitmap) {
-        // Render alt text as placeholder
-        std::wstring altText = L"[image";
+        // Render alt text as placeholder, in the interface's language
+        std::wstring altText = std::wstring(L"[") + tr(app, "image.placeholder");
         std::wstring alt;
         std::function<void(const ElementPtr&)> extract = [&](const ElementPtr& e) {
             if (!e) return;
@@ -3241,6 +3261,11 @@ static void layoutImage(App& app, const ElementPtr& elem, float& y, float indent
         for (const auto& c : elem->children) extract(c);
         if (!alt.empty()) {
             altText += L": " + alt;
+        }
+        // An image left on another computer's share says why it is missing
+        if (entry.blocked) {
+            altText += L" \u2014 ";
+            altText += tr(app, "image.network_blocked");
         }
         altText += L"]";
 

@@ -1,6 +1,7 @@
 #include "frontmatter_ui.h"
 #include "input.h"
 #include "link_target.h"
+#include "network_path.h"
 #include "annotations.h"
 #include "drafts.h"
 #include "editrail.h"
@@ -2393,8 +2394,11 @@ static bool openWikiLink(App& app, const std::string& target) {
     std::wstring wideTarget = toWide(target);
     fs::path dir = fs::path(toWide(app.currentFile)).parent_path();
 
+    // A wiki link names a note; one that reaches another computer's share
+    // is not looked up (network_path.h)
     auto tryOpen = [&](const fs::path& p) {
-        return fs::exists(p, ec) && !fs::is_directory(p, ec) &&
+        return qmd::mayOpenFromDocument(p.wstring(), dir.wstring()) &&
+               fs::exists(p, ec) && !fs::is_directory(p, ec) &&
                openDocumentInViewer(app, p.wstring());
     };
     if (tryOpen(dir / wideTarget)) return true;
@@ -4469,11 +4473,15 @@ void handleLinkPeekTimer(App& app, HWND hwnd) {
                !app.currentFile.empty()) {
         std::wstring t = toWide(app.linkPeekUrl.substr(5));
         fs::path dir = fs::path(toWide(app.currentFile)).parent_path();
-        if (fs::exists(dir / t, ec)) {
+        // Hovering never reaches another computer's share (network_path.h)
+        auto found = [&](const fs::path& p) {
+            return qmd::mayOpenFromDocument(p.wstring(), dir.wstring()) && fs::exists(p, ec);
+        };
+        if (found(dir / t)) {
             target = dir / t;
-        } else if (fs::exists(dir / (t + L".md"), ec)) {
+        } else if (found(dir / (t + L".md"))) {
             target = dir / (t + L".md");
-        } else if (fs::exists(dir / (t + L".markdown"), ec)) {
+        } else if (found(dir / (t + L".markdown"))) {
             target = dir / (t + L".markdown");
         }
     }

@@ -13,6 +13,7 @@
 #include "link_target.h"
 #include "math_render.h"
 #include "mermaid_ext.h"
+#include "network_path.h"
 #include "plantuml.h"
 #include "plantuml_app.h"
 #include "plantuml_queue.h"
@@ -904,8 +905,10 @@ void walkInline(DocxCtx& ctx, const ElementPtr& elem, RunProps props,
                     }
                     if (extension == "jpg") extension = "jpeg";
                 }
+                // Another computer's share stays unopened, as in the viewer
                 if ((extension == "png" || extension == "jpeg" ||
                      extension == "gif") &&
+                    qmd::mayOpenFromDocument(widePath, ctx.baseDir) &&
                     readBinaryFile(widePath, data) &&
                     imageDimensions(data, width, height)) {
                     int rel = addImageRel(ctx, extension, data);

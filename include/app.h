@@ -349,6 +349,7 @@ struct App {
         int height = 0;
         bool failed = false;
         bool pending = false;  // remote image download in flight
+        bool blocked = false;  // on another computer's share, left unopened
         size_t bytes = 0;      // estimated decoded bitmap memory
         unsigned long long lastUsed = 0;
     };

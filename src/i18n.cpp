@@ -234,6 +234,11 @@ const Entry kEntries[] = {
     // Renders as "[image: <alt>]". The brackets and separator are added by
     // the renderer; only the word "image" is translated here.
     { "image.placeholder", L"image", L"\u56FE\u7247", L"\u753B\u50CF", L"\uC774\uBBF8\uC9C0" },
+    // Follows the alt text when the image is on another computer's share,
+    // which Tinta does not open for a document on its own
+    { "image.network_blocked", L"network path not opened", L"\u672A\u6253\u5F00\u7F51\u7EDC\u8DEF\u5F84",
+      L"\u30CD\u30C3\u30C8\u30EF\u30FC\u30AF \u30D1\u30B9\u3092\u958B\u3044\u3066\u3044\u307E\u305B\u3093",
+      L"\uB124\uD2B8\uC6CC\uD06C \uACBD\uB85C\uB97C \uC5F4\uC9C0 \uC54A\uC74C" },
 
     // ----- Context menu (post-#84 surface) -----
     { "ctx.copy", L"Copy", L"\u590D\u5236", L"\u30B3\u30D4\u30FC", L"\uBCF5\uC0AC" },
@@ -999,6 +1004,10 @@ const BuiltinTranslation kBuiltinTranslations[] = {
       L"Bild",
       L"image",
       L"immagine" },
+    { "image.network_blocked",
+      L"Netzwerkpfad nicht ge\u00F6ffnet",
+      L"chemin r\u00E9seau non ouvert",
+      L"percorso di rete non aperto" },
     { "ctx.copy",
       L"Kopieren",
       L"Copier",

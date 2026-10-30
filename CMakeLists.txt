@@ -184,6 +184,7 @@ if(BUILD_TESTING)
         TINTA_IMAGE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/image-cache-large.md"
         TINTA_ENCODED_IMAGE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/encoded-images-293/index.md"
         TINTA_SAME_IMAGE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/same-image-name"
+        TINTA_NETWORK_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/network-paths/index.md"
         TINTA_FIND_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/find-table-focus.md"
         TINTA_WRAP_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/wrapped-cursor-selection.md"
         TINTA_SEARCH_WRAP_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/search-word-wrap-260.md"
