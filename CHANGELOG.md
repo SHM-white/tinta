@@ -1,5 +1,18 @@
 # Changelog
 
+## [v3.9.6] - 2026-10-31
+
+### Security
+- Images, wiki links and file references on another computer's share (`\\server\share\...`, however the path is written) open only in a document from that same server, since opening the share signs in to it with your Windows credentials. Anywhere else an image shows the note "network path not opened" in the viewer, in print and in the HTML and Word exports. Files on this computer and on a share mapped to a drive letter open as before
+
+### Fixed
+- Tables, code blocks, quotes and other blocks inside list items render where they are written, with their own layout; a table in a list showed its cells as run-together text, and the item's text came out of order. A heading that starts a list item lines up with its number, bullet or checkbox and stays with it at a page break, and raw HTML list items without a closing `</li>` stay separate items. Contributed by @shinfd (#292)
+- Local images whose path holds percent escapes, such as `folder%20with%20space/image.png`, show in the viewer and in the HTML and Word exports instead of a placeholder. Reported and contributed by @tferi99 (#293, #294)
+- Documents in different folders that show an image of the same name, such as `shot.png`, each show their own; the second showed the first one's image while it stayed cached
+- Lists, quotes and emphasis nested a thousand or more levels deep no longer crash Tinta when it shows, prints, exports or copies them. Lists now nest up to 50 levels and quotes up to 100, and anything deeper goes on at the deepest level with all its text
+- A file that starts with a UTF-8 byte order mark, which Windows PowerShell 5.1 and Visual Studio write, reads its first line properly: a heading there showed as the literal `# Title`, a table, list or code fence there was misread, and front matter left an empty line under the properties. Editing and saving keep the mark
+- Text written directly inside a raw HTML `<blockquote>`, without a `<p>` around it, shows in the quote; it was missing from the page, print and copies. The Word export keeps it as one quote paragraph with its bold, links and line breaks, and an `<a id>` right inside such a quote works as a link target
+
 ## [v3.9.5] - 2026-10-29
 
 ### Added
