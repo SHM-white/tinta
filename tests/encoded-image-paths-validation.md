@@ -33,7 +33,8 @@ Found on the way, before this PR: a local image path that is absolute,
 network paths included, replaces the document's folder. A document can
 make Tinta open `//host/share/x.png` when it is viewed or exported, as
 `//localhost/C$/...` did here, and Windows signs in to such shares with
-the user's credentials. That is left for a separate decision.
+the user's credentials. That was fixed separately: a document now opens
+network paths only on its own server (`network-paths-validation.md`).
 
 ## Checks
 
