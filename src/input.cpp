@@ -1,5 +1,6 @@
 #include "frontmatter_ui.h"
 #include "input.h"
+#include "touch.h"
 #include "link_target.h"
 #include "network_path.h"
 #include "annotations.h"
@@ -42,6 +43,9 @@ static HCURSOR cursorArrow = LoadCursor(nullptr, IDC_ARROW);
 static HCURSOR cursorHand  = LoadCursor(nullptr, IDC_HAND);
 static HCURSOR cursorIBeam = LoadCursor(nullptr, IDC_IBEAM);
 static HCURSOR cursorSizeWE = LoadCursor(nullptr, IDC_SIZEWE);
+
+static bool tableCopyButtonAt(const App& app, int mouseX, int mouseY);
+static bool tableFitButtonAt(const App& app, int mouseX, int mouseY);
 
 static const App::TaskRect* taskRectAt(const App& app);
 static void startPageInvoke(App& app, HWND hwnd, int id);
@@ -1868,10 +1872,14 @@ void handleContextMenu(App& app, HWND hwnd, LPARAM lParam) {
         return;
     }
 
-    // Document menu: viewer mode only, and never on top of a modal
+    // The rendered preview has its own selection/copy menu too. Never
+    // route a source-pane or modal press into the document beneath it.
+    const bool inPreview = app.editMode && editorPreviewVisible(app) &&
+                           pt.x >= documentViewportX(app) && pt.y >= chromeTopHeight(app);
+    // Document menu: viewer or preview, and never on top of a modal
     // overlay. The search bar is fine — it shares the viewport rather
     // than covering it.
-    if (app.editMode || app.showThemeChooser || app.showHelp ||
+    if ((app.editMode && !inPreview) || app.showThemeChooser || app.showHelp ||
         app.showPrintPreview || app.showSettings || app.showThemeEditor) {
         return;
     }
@@ -2067,6 +2075,16 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
 
     // Help overlay: check scrollbar click
     if (app.showHelp) {
+        const auto panel = helpPanelRect(app);
+        const float x = (float)GET_X_LPARAM(lParam), y = (float)GET_Y_LPARAM(lParam);
+        if (!cursorPointInRect(x, y, panel)) {
+            app.showHelp = false;
+            app.helpAnimation = 0;
+            app.swallowNextMouseUp = true;
+            touchStopFling(app, hwnd);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return;
+        }
         float maxScroll = std::max(0.0f, app.helpContentHeight - app.helpVisibleHeight);
         if (maxScroll > 0) {
             int clickX = GET_X_LPARAM(lParam);
@@ -2163,6 +2181,24 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         if (app.editorShowPreview && !app.editorReadingPreview) {
             float docX = (float)x - documentViewportX(app) + app.scrollX;
             float docY = (float)y + app.scrollY;
+            // Table actions sit above cells. Resolve the press itself rather
+            // than relying on a hover frame, including a finger's first tap.
+            const int oldHover = app.hoveredTable;
+            bool tableAction = false;
+            for (int i = 0; i < (int)app.tableRects.size(); ++i) {
+                app.hoveredTable = i;
+                if (tableCopyButtonAt(app, x, y) || tableFitButtonAt(app, x, y)) {
+                    tableAction = true;
+                    break;
+                }
+            }
+            if (tableAction) {
+                tableEditCommit(app);
+                app.mouseX = x;
+                app.mouseY = y;
+                return; // the existing release handler invokes Fit / Copy
+            }
+            app.hoveredTable = oldHover;
             if (tableEditMouseDown(app, hwnd, docX, docY)) {
                 app.swallowNextMouseUp = true;
                 return;

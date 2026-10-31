@@ -15,12 +15,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: split-preview-links
-            ref: 31eb70dc09c52b2386392a2ab6f1b583fd1a0d35
-          - name: exit-editor-menu
-            ref: 745a4d936b4ad5dab60d1adb3e715cde2b48ae61
           - name: editor-keyboard
-            ref: 75f363d25511d33262ba915132b5fc6d07250ce7
+            ref: 865e5f4941e2c93880943883e0fbfeffb052d9ee
+          - name: preview-selection
+            ref: 9e4574fa8c8811fe15023edf08ba76658aedb9f1
+          - name: help-panel
+            ref: 212d4402d2b1c503b52d7384d57a1739fd77955a
+          - name: table-action-priority
+            ref: ec0f5953c0c370ddefde02e3353d2661668fe8f1
           - name: combined
             ref: ''
     steps:

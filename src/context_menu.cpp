@@ -3,6 +3,10 @@
 #include <algorithm>
 
 const std::vector<ContextMenuEntry>& contextMenuEntries(const App& app) {
+    static const std::vector<ContextMenuEntry> preview = {
+        {CTX_COPY, "ctx.copy", L"Ctrl+C", false},
+        {CTX_SELECT_ALL, "ctx.select_all", L"Ctrl+A", false},
+    };
     static const std::vector<ContextMenuEntry> document = {
         {CTX_COPY, "ctx.copy", L"Ctrl+C", false},
         {CTX_SELECT_ALL, "ctx.select_all", L"Ctrl+A", false},
@@ -37,7 +41,8 @@ const std::vector<ContextMenuEntry>& contextMenuEntries(const App& app) {
         entries.insert(entries.begin() + 4, {CTX_END_EDIT, "ctx.end_edit", L"", true});
         return entries;
     }();
-    return app.applicationMenu ? (app.editMode ? editingApplication : application) : document;
+    return app.applicationMenu ? (app.editMode ? editingApplication : application)
+                               : (app.editMode ? preview : document);
 }
 
 float contextMenuPadding(const App& app) { return dpi(app, 6.0f); }

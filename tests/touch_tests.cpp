@@ -14,6 +14,7 @@
 #include "settings.h"
 #include "sidepanels.h"
 #include "touch.h"
+#include "tableedit.h"
 #include "utils.h"
 
 #include <algorithm>
@@ -411,6 +412,33 @@ void scenario(App& app, const char* path, int width, float scale) {
     check(app.hasSelection && selected(app).size() > 20 && app.scrollY == 0, "a mouse drag still selects text" + where);
     app.hasSelection = false;
 
+    const float pageBeforeHelp = app.scrollY;
+    app.showHelp = true;
+    app.helpAnimation = 1;
+    app.helpScroll = 0;
+    app.renderTarget->BeginDraw();
+    renderHelpOverlay(app);
+    check(SUCCEEDED(app.renderTarget->EndDraw()), "help paints at the current width and scale");
+    const auto help = helpPanelRect(app);
+    const POINT helpPoint{(LONG)((help.left + help.right) / 2),
+                          (LONG)(app.helpScrollbarTop + app.helpVisibleHeight - dpi(app, 40))};
+    check(touchTargetAt(app, helpPoint, list) == TouchTarget::Help, "help text owns its touch scrolling");
+    swipe(app, 73, helpPoint, 0, -20, 8, 16, 200);
+    check(app.helpScroll > 0 && app.scrollY == pageBeforeHelp && app.showHelp,
+          "help scrolls without moving or closing the document");
+    swipe(app, 74, helpPoint, 0, -10, 3, 10, 5);
+    check(app.touch.flinging, "help supports inertial scrolling");
+    for (bool right : {false, true}) {
+        app.showHelp = true;
+        app.helpAnimation = 1;
+        const POINT outside{(LONG)(right ? help.right + dpi(app, 8) : help.left - dpi(app, 8)), app.height / 2};
+        check(!touchDown(app, app.hwnd, 75, outside, ms += 1000), "help backdrop leaves its tap to mouse emulation");
+        handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(outside.x, outside.y));
+        handleMouseUp(app, app.hwnd, 0, MAKELPARAM(outside.x, outside.y));
+        check(!app.showHelp && !app.touch.flinging && app.scrollY == pageBeforeHelp,
+              "either side closes help and consumes the click");
+    }
+
     // Edit mode: the editor's text pans, a tap places the caret, and a pan
     // on the preview takes the editor along
     enterEditMode(app);
@@ -457,6 +485,37 @@ void scenario(App& app, const char* path, int width, float scale) {
     check(app.editorText == sourceBeforeJump && app.editorDirty == dirtyBeforeJump &&
               app.editorCursorPos == caretBeforeJump,
           "preview link navigation does not edit source or move its caret" + where);
+
+    app.editorScrollY = 0;
+    editFrame(app);
+    const auto sourceBeforeHold = app.editorText;
+    const POINT previewFrom = wordPoint(app, L"lavender"), previewTo = wordPoint(app, L"rosemary");
+    touchDown(app, app.hwnd, 71, previewFrom, ms += 1000);
+    touchHold(app, app.hwnd);
+    check(selected(app) == L"lavender", "split-preview hold selects rendered text");
+    touchMove(app, app.hwnd, 71, previewTo, ms += 100);
+    const auto previewSelection = selected(app);
+    check(previewSelection.find(L"lavender") == 0 && previewSelection.find(L"rosemary") != std::wstring::npos,
+          "split-preview hold extends through whole words");
+    touchUp(app, app.hwnd, 71, previewTo, ms += 100, false);
+    check(app.showContextMenu && !app.editCtxOpen && !app.selecting && selected(app) == previewSelection,
+          "preview lift opens its copy menu and keeps the selection");
+    check(contextMenuItemEnabled(app, CTX_COPY) && app.editorText == sourceBeforeHold,
+          "preview copy is enabled without modifying source");
+    closeContextMenu(app);
+    check(!app.tableCellRects.empty(), "preview hold fixture contains table cells");
+    if (!app.tableCellRects.empty()) {
+        const auto cell = app.tableCellRects.front();
+        app.scrollY = app.targetScrollY = cell.rect.top - chromeTopHeight(app) - dpi(app, 80);
+        const POINT p{(LONG)(documentViewportX(app) + cell.rect.left + dpi(app, 12)),
+                      (LONG)(cell.rect.top - app.scrollY + dpi(app, 12))};
+        touchDown(app, app.hwnd, 72, p, ms += 1000);
+        touchHold(app, app.hwnd);
+        check(!app.tableEditActive && app.selecting, "holding a preview cell selects instead of opening its editor");
+        touchUp(app, app.hwnd, 72, p, ms += 100, false);
+        check(app.showContextMenu && !app.tableEditActive, "table hold opens the preview copy menu");
+        closeContextMenu(app);
+    }
 
     // The existing application menu provides a touch exit without bypassing
     // the same unsaved-changes guard used by Esc.
