@@ -25,6 +25,19 @@ using Phase = App::TouchGesture::Phase;
 // Movement under this is still a tap or a hold
 float slop(const App& app) { return dpi(app, 10.0f); }
 
+bool sameContext(const App& app) {
+    const auto& t = app.touch;
+    return app.activeTab == t.contextTab && app.currentFile == t.contextFile &&
+           app.editMode == t.contextEdit;
+}
+
+void resetTap(App& app) {
+    app.touch.tapMs = 0;
+    app.touch.tapTarget = TouchTarget::None;
+    app.lastClickTime = {};
+    app.clickCount = 0;
+}
+
 bool isExtra(const App::TouchGesture& t, UINT32 pointer) {
     return std::find(t.extra.begin(), t.extra.end(), pointer) != t.extra.end();
 }
@@ -33,7 +46,7 @@ bool isExtra(const App::TouchGesture& t, UINT32 pointer) {
 bool overlayUp(const App& app) {
     return app.showSettings || app.showThemeEditor || app.showShortcutEditor ||
            app.showThemeChooser || app.showHelp || app.showPrintPreview || app.showLightbox ||
-           app.showContextMenu || app.showTabMenu || app.showTabSwitcher ||
+           app.showContextMenu || app.editCtxOpen || app.showTabMenu || app.showTabSwitcher ||
            app.confirmExitPending || app.createRefPending ||
            (app.annotEditorOpen && !app.editMode) || app.signalTrayOpen || app.gotoLineOpen ||
            app.appMenuPressed || startPageActive(app);
@@ -55,9 +68,9 @@ bool onSidePanel(const App& app, float x) {
 
 bool onSearchBar(const App& app, float x, float y) {
     if (!app.showSearch) return false;
-    D2D1_RECT_F bar = searchBarRect(app);
+    D2D1_RECT_F bar = searchBarDrawRect(app);
     // The replace row sits under the find row
-    if (app.searchReplaceMode) bar.bottom += bar.bottom - bar.top;
+    if (app.editMode && app.searchReplaceMode) bar.bottom = searchReplaceRowRect(app).bottom;
     const float margin = dpi(app, 8.0f);
     return x >= bar.left - margin && x <= bar.right + margin && y >= bar.top - margin &&
            y <= bar.bottom + margin;
@@ -147,14 +160,18 @@ void click(App& app, HWND hwnd, POINT at) {
 
 void tap(App& app, HWND hwnd, POINT pt, double ms, TouchTarget target) {
     auto& t = app.touch;
-    const bool again = t.tapMs > 0 && ms - t.tapMs <= GetDoubleClickTime() && t.tapTarget == target &&
+    const bool text = target == TouchTarget::Document || target == TouchTarget::Editor;
+    const bool again = text && t.tapMs > 0 && ms >= t.tapMs &&
+                       ms - t.tapMs <= GetDoubleClickTime() && t.tapTarget == target &&
                        std::hypot(float(pt.x - t.tapPoint.x), float(pt.y - t.tapPoint.y)) <=
                            dpi(app, 24.0f);
     // A finger's second tap lands a little off the first: it clicks where
     // the first did, so the click handlers count the double-click it is
     const POINT at = again ? t.tapPoint : pt;
+    if (!again) resetTap(app);
+    else app.lastClickTime = std::chrono::steady_clock::now();
     t.tapPoint = at;
-    t.tapMs = ms;
+    t.tapMs = text ? ms : 0;
     t.tapTarget = target;
     click(app, hwnd, at);
 }
@@ -196,6 +213,7 @@ void startFling(App& app, HWND hwnd, float vx, float vy, double ms) {
     t.flingMs = ms;
     t.flingTab = app.activeTab;
     t.flingFile = app.currentFile;
+    t.flingEdit = app.editMode;
     SetTimer(hwnd, TIMER_TOUCH_FLING, 16, nullptr);
 }
 
@@ -203,6 +221,7 @@ void endGesture(App::TouchGesture& t) {
     t.active = false;
     t.phase = Phase::Idle;
     t.multi = false;
+    t.braking = false;
     t.samples.clear();
 }
 
@@ -224,6 +243,7 @@ TouchTarget touchTargetAt(const App& app, POINT pt, PanelList& list) {
     const float x = static_cast<float>(pt.x), y = static_cast<float>(pt.y);
     if (overlayUp(app) || x < 0 || y < chromeTopHeight(app) || x >= app.width || y >= app.height)
         return TouchTarget::None;
+    if (sidePanelResizeAt(app, x, y) != SidePanel::None) return TouchTarget::None;
     // A side panel's list; its scrollbar drags as with the mouse
     for (PanelList which : {PanelList::Search, PanelList::Contents, PanelList::Browser}) {
         PanelListView view;
@@ -257,30 +277,45 @@ bool touchDown(App& app, HWND hwnd, UINT32 pointer, POINT pt, double ms) {
         // or holds
         if (!isExtra(t, pointer)) t.extra.push_back(pointer);
         t.multi = true;
+        resetTap(app);
         KillTimer(hwnd, TIMER_TOUCH_HOLD);
         return true;
     }
-    touchStopFling(app, hwnd);
     PanelList list = PanelList::None;
     const TouchTarget target = touchTargetAt(app, pt, list);
+    const bool braking = t.flinging && target != TouchTarget::None &&
+                         target == t.flingTarget && list == t.flingList &&
+                         app.activeTab == t.flingTab && app.currentFile == t.flingFile &&
+                         app.editMode == t.flingEdit;
+    touchStopFling(app, hwnd);
+    if (!sameContext(app) || target == TouchTarget::None) resetTap(app);
     if (target == TouchTarget::None) return false;
     endGesture(t);
     t.active = true;
+    t.braking = braking;
+    if (braking) {
+        t.tapMs = 0;
+        app.lastClickTime = {};
+    }
     t.pointer = pointer;
     t.phase = Phase::Pending;
     t.target = target;
     t.list = list;
     t.start = t.last = pt;
+    t.contextTab = app.activeTab;
+    t.contextFile = app.currentFile;
+    t.contextEdit = app.editMode;
     t.axis = 0;
     t.samples.push_back({ms, static_cast<float>(pt.x), static_cast<float>(pt.y)});
     // A held row is a slow tap: only text selects
-    if (target != TouchTarget::List) SetTimer(hwnd, TIMER_TOUCH_HOLD, kHoldMs, nullptr);
+    if (target != TouchTarget::List && !braking) SetTimer(hwnd, TIMER_TOUCH_HOLD, kHoldMs, nullptr);
     return true;
 }
 
 bool touchMove(App& app, HWND hwnd, UINT32 pointer, POINT pt, double ms) {
     auto& t = app.touch;
     if (!t.active || pointer != t.pointer) return isExtra(t, pointer);
+    if (!sameContext(app)) { touchCancel(app, hwnd); return true; }
     t.samples.push_back({ms, static_cast<float>(pt.x), static_cast<float>(pt.y)});
     while (t.samples.size() > 2 && ms - t.samples[1].ms > kSpeedWindowMs * 2)
         t.samples.erase(t.samples.begin());
@@ -291,6 +326,7 @@ bool touchMove(App& app, HWND hwnd, UINT32 pointer, POINT pt, double ms) {
         // also pans across
         KillTimer(hwnd, TIMER_TOUCH_HOLD);
         t.phase = Phase::Panning;
+        resetTap(app);
         t.axis = std::fabs(dx) > std::fabs(dy) && pansAcross(app, t.target) ? 2 : 1;
         scrollOf(app, t.target, t.list, t.originX, t.originY);
         tabHoverCardDismiss(app, hwnd);
@@ -317,6 +353,7 @@ bool touchUp(App& app, HWND hwnd, UINT32 pointer, POINT pt, double ms, bool canc
         t.extra.erase(it);
         return true;
     }
+    if (canceled || !sameContext(app)) { touchCancel(app, hwnd); return true; }
     KillTimer(hwnd, TIMER_TOUCH_HOLD);
     const Phase phase = t.phase;
     const TouchTarget target = t.target;
@@ -344,7 +381,7 @@ bool touchUp(App& app, HWND hwnd, UINT32 pointer, POINT pt, double ms, bool canc
         float vx, vy;
         releaseSpeed(t, ms, vx, vy);
         startFling(app, hwnd, vx, vy, ms);
-    } else if (!canceled && phase == Phase::Pending && !multi) {
+    } else if (!canceled && phase == Phase::Pending && !multi && !t.braking) {
         tap(app, hwnd, pt, ms, target);
     }
     endGesture(t);
@@ -354,7 +391,9 @@ bool touchUp(App& app, HWND hwnd, UINT32 pointer, POINT pt, double ms, bool canc
 void touchHold(App& app, HWND hwnd) {
     KillTimer(hwnd, TIMER_TOUCH_HOLD);
     auto& t = app.touch;
-    if (!t.active || t.phase != Phase::Pending || t.multi) return;
+    if (!t.active || t.phase != Phase::Pending || t.multi || t.braking) return;
+    if (!sameContext(app)) { touchCancel(app, hwnd); return; }
+    resetTap(app);
     t.phase = Phase::Holding;
     if (t.target == TouchTarget::Editor) {
         editorTouchSelection(app, t.start.x, t.start.y, true);
@@ -379,7 +418,7 @@ bool touchFlingStep(App& app, HWND hwnd, double ms) {
     auto& t = app.touch;
     if (!t.flinging) return false;
     // The document under it changed: the fling belonged to the other one
-    if (app.activeTab != t.flingTab || app.currentFile != t.flingFile) {
+    if (app.activeTab != t.flingTab || app.currentFile != t.flingFile || app.editMode != t.flingEdit) {
         touchStopFling(app, hwnd);
         return false;
     }
@@ -409,11 +448,15 @@ void touchStopFling(App& app, HWND hwnd) {
 
 void touchCancel(App& app, HWND hwnd) {
     auto& t = app.touch;
-    if (!t.active) return;
     KillTimer(hwnd, TIMER_TOUCH_HOLD);
+    touchStopFling(app, hwnd);
+    resetTap(app);
     // A selection under way keeps what it has, without the menu
-    if (t.phase == Phase::Holding) {
-        handleMouseUp(app, hwnd, 0, MAKELPARAM(t.last.x, t.last.y));
+    if (t.active && t.phase == Phase::Holding) {
+        // Cancel the owned selection directly; a new modal must not receive
+        // a synthetic release that could activate one of its controls.
+        if (t.target == TouchTarget::Editor) handleEditorMouseUp(app, hwnd, t.last.x, t.last.y);
+        else app.selecting = false;
         pointerAway(app, hwnd);
     }
     endGesture(t);

@@ -1,0 +1,58 @@
+name: Touch Plan A review
+
+on:
+  push:
+    branches: [review/touch-a]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: upstream-baseline
+            ref: b48811841839af58d17861e65c258240b5cd4b16
+          - name: editor-hold-selection
+            ref: ae3de1e3c3084ac48e6300c5b4e8a3cd88f7d62d
+          - name: control-routing
+            ref: 5d6e326a368986cb7ee06485fb000552ae67bbd8
+          - name: fling-brake
+            ref: 24f48fc1dcd20cae960545eaba89c5ad11f8dde8
+          - name: gesture-lifecycle
+            ref: 0679ae9d8507801379ea0f124b99412eaa60349a
+          - name: combined
+            ref: ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref || github.sha }}
+          persist-credentials: false
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        env:
+          CFLAGS: /MP
+          CXXFLAGS: /MP
+      - name: Build app and input regression harnesses
+        run: cmake --build build --config Release --parallel --target tinta input_tests keymap_tests context_menu_tests
+      - name: Input regression tests
+        run: ctest --test-dir build -C Release --output-on-failure -R '^(keymap|context_menu|input_shortcuts|editor_features|editor_context_selection|wrapped_cursor_navigation|edit_preview_scroll_sync|search_input_focus|table_and_modifier_input|docked_preview_and_hints|window_drag_and_title_space|contents_and_panel_resize|split_scrollbars|editor_drag_move|touch_gestures|search_results_panel)$'
+      - name: Test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: touch-a-${{ matrix.name }}-logs
+          path: build/Testing/Temporary/
+          retention-days: 14
+      - name: Portable review build
+        uses: actions/upload-artifact@v4
+        with:
+          name: touch-a-${{ matrix.name }}-windows
+          path: |
+            build/Release/tinta.exe
+            tests/fixtures/touch-gestures-286.md
+          retention-days: 14

@@ -914,10 +914,15 @@ struct App {
         UINT32 pointer = 0;
         std::vector<UINT32> extra;
         bool multi = false;  // another finger came down
+        bool braking = false;  // this press caught its target's fling
         TouchTarget target = TouchTarget::None;
         PanelList list = PanelList::None;
         POINT start{}, last{};
         size_t editorWordStart = 0, editorWordEnd = 0;
+
+        int contextTab = -1;
+        std::string contextFile;
+        bool contextEdit = false;
         int axis = 0;  // while panning: 1 vertical, 2 horizontal
         float originX = 0, originY = 0;
         struct Sample { double ms; float x, y; };
@@ -934,6 +939,7 @@ struct App {
         double flingMs = 0;
         int flingTab = -1;
         std::string flingFile;
+        bool flingEdit = false;
     } touch;
     float tocAnimation = 0.0f;  // 0 to 1 slide-in from the chosen side
     // A clicked heading stays the active row even when the scroll cannot

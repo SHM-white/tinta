@@ -11,6 +11,7 @@
 #include "render.h"
 #include "selection.h"
 #include "settings.h"
+#include "sidepanels.h"
 #include "touch.h"
 #include "utils.h"
 
@@ -112,6 +113,49 @@ void editorHoldScenario(App& app) {
     check(app.editorText == original && app.editorDirty == dirty, "touch selection never edits the source");
 }
 
+void controlRoutingScenario(App& app) {
+    PanelList list;
+    app.showSearch = app.searchReplaceMode = true;
+    for (float animation : {0.4f, 1.0f}) {
+        app.searchAnimation = animation;
+        app.renderTarget->BeginDraw();
+        renderSearchOverlay(app);
+        check(SUCCEEDED(app.renderTarget->EndDraw()), "replace bar paints");
+        check(!app.searchReplaceHits.empty(), "replace controls have painted hit regions");
+        for (const auto& hit : app.searchReplaceHits) {
+            const auto& r = hit.first;
+            POINT p{(LONG)((r.left + r.right) / 2), (LONG)((r.top + r.bottom) / 2)};
+            check(touchTargetAt(app, p, list) == TouchTarget::None,
+                  "every painted replace control keeps mouse emulation, including stacked buttons");
+        }
+    }
+    app.showSearch = app.searchReplaceMode = false;
+    const POINT preview{(LONG)(documentViewportX(app) + dpi(app, 12)), app.height / 2};
+    openEditCtxMenu(app, app.hwnd, (float)preview.x, (float)preview.y);
+    app.renderTarget->BeginDraw();
+    renderEditCtxMenu(app);
+    check(SUCCEEDED(app.renderTarget->EndDraw()), "editor menu paints across the pane boundary");
+    POINT submenu{-1, -1};
+    for (const auto& hit : app.editCtxHits) {
+        if (hit.second == 110) submenu = {(LONG)((hit.first.left + hit.first.right) / 2),
+                                        (LONG)((hit.first.top + hit.first.bottom) / 2)};
+    }
+    check(submenu.x >= documentViewportX(app), "the table menu entry is over the preview");
+    check(!touchDown(app, app.hwnd, 60, submenu, ms += 1000), "an editor menu touch goes to mouse emulation");
+    const auto source = app.editorText;
+    const auto caret = app.editorCursorPos;
+    handleMouseMove(app, app.hwnd, MAKELPARAM(submenu.x, submenu.y));
+    handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(submenu.x, submenu.y));
+    handleMouseUp(app, app.hwnd, 0, MAKELPARAM(submenu.x, submenu.y));
+    check(app.editCtxOpen && app.editCtxSub == 1 && app.editorText == source && app.editorCursorPos == caret,
+          "the menu opens its submenu over the preview without changing source or caret");
+    const POINT outside{app.width - (LONG)dpi(app, 24), (LONG)(chromeTopHeight(app) + dpi(app, 20))};
+    handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(outside.x, outside.y));
+    handleMouseUp(app, app.hwnd, 0, MAKELPARAM(outside.x, outside.y));
+    check(!app.editCtxOpen && !app.selecting && app.editorText == source && app.editorCursorPos == caret,
+          "dismissing the editor menu consumes the click over the preview");
+}
+
 void scenario(App& app, const char* path, int width, float scale) {
     const std::string where = " (" + std::to_string(width) + ", " + std::to_string(scale).substr(0, 3) + "x)";
     app.contentScale = scale;
@@ -190,6 +234,24 @@ void scenario(App& app, const char* path, int width, float scale) {
 
     // A tap follows a link, and leaves no hover behind
     app.scrollY = app.targetScrollY = 0;
+    swipe(app, 52, low, 0, -10, 2, 10, 5);
+    check(app.touch.flinging, "the page is flinging before a braking tap");
+    const POINT brakeLink = wordPoint(app, L"jump to the end");
+    const float brakeY = app.scrollY;
+    touchDown(app, app.hwnd, 53, brakeLink, ms += 16);
+    touchHold(app, app.hwnd); // even a queued timer must not select
+    touchUp(app, app.hwnd, 53, brakeLink, ms += 600, false);
+    check(!app.touch.flinging && app.scrollY == brakeY && !app.hasSelection && !app.showContextMenu,
+          "catching a fling over a link only stops it, even if held");
+    tapAt(app, 54, brakeLink);
+    check(app.scrollY > maxY - dpi(app, 400), "the next deliberate tap follows the link");
+    app.scrollY = app.targetScrollY = 0;
+    swipe(app, 55, low, 0, -20, 4, 10, 5);
+    const float beforeDrag = app.scrollY;
+    swipe(app, 56, middle, 0, -20, 4, 16, 200);
+    check(!app.touch.flinging && std::fabs(app.scrollY - beforeDrag - 80) < 1,
+          "a braking press can continue directly into another pan");
+    app.scrollY = app.targetScrollY = 0;
     tapAt(app, 6, wordPoint(app, L"jump to the end"));
     check(app.scrollY > maxY - dpi(app, 400) && !app.hasSelection && app.mouseX == -1 && app.hoveredLink.empty(),
           "a tap follows a link" + where + ": " + std::to_string(app.scrollY));
@@ -263,6 +325,14 @@ void scenario(App& app, const char* path, int width, float scale) {
     app.tocFilter.clear();
     app.tocSpyOverride = -1;
     const D2D1_RECT_F rows = tocListRect(app);
+    const bool wasLeft = app.tocOnLeft;
+    for (bool left : {false, true}) {
+        app.tocOnLeft = left;
+        const POINT edge{(LONG)sidePanelResizeEdge(app, SidePanel::Contents), app.height / 2};
+        check(touchTargetAt(app, edge, list) == TouchTarget::None,
+              "both Contents resize edges keep mouse emulation instead of panning the list");
+    }
+    app.tocOnLeft = wasLeft;
     const POINT inList{(LONG)(rows.left + dpi(app, 40)), (LONG)(rows.bottom - dpi(app, 60))};
     check(touchTargetAt(app, inList, list) == TouchTarget::List && list == PanelList::Contents,
           "a finger on the Contents drives its list" + where);
@@ -274,6 +344,60 @@ void scenario(App& app, const char* path, int width, float scale) {
     check(heading > 0 && app.tocSpyOverride == heading && !app.showToc && app.scrollY > 0,
           "a tap on a Contents row opens its section" + where);
     app.showToc = false;
+
+    // Adjacent rows can be closer than the forgiving text double-tap radius.
+    // Each list tap must still use the finger's actual landing point.
+    app.showToc = true;
+    app.tocAnimation = 1;
+    app.tocScroll = 0;
+    const auto listRect = tocListRect(app);
+    const LONG rowX = (LONG)(listRect.left + dpi(app, 40));
+    bool adjacent = false;
+    for (LONG y = (LONG)listRect.top + 1; y < listRect.bottom - 1; ++y) {
+        const int first = tocItemIndexAt(app, (float)rowX, (float)y);
+        const int second = tocItemIndexAt(app, (float)rowX, (float)(y + 1));
+        if (first < 0 || second <= first) continue;
+        tapAt(app, 61, POINT{rowX, y});
+        app.showToc = true;
+        app.tocAnimation = 1;
+        app.tocScroll = 0;
+        touchDown(app, app.hwnd, 62, POINT{rowX, y + 1}, ms += 30);
+        touchUp(app, app.hwnd, 62, POINT{rowX, y + 1}, ms += 40, false);
+        check(app.tocSpyOverride == second, "nearby taps on adjacent rows activate the actual second row");
+        adjacent = true;
+        break;
+    }
+    check(adjacent, "the Contents has adjacent rows to test");
+    app.showToc = false;
+
+    app.scrollY = app.targetScrollY = 0;
+    const POINT freshWord = wordPoint(app, L"marigold");
+    tapAt(app, 63, freshWord);
+    touchDown(app, app.hwnd, 64, freshWord, ms += 10);
+    touchMove(app, app.hwnd, 64, shifted(freshWord, 0, (int)dpi(app, 20)), ms += 20);
+    touchUp(app, app.hwnd, 64, shifted(freshWord, 0, (int)dpi(app, 20)), ms += 100, false);
+    touchDown(app, app.hwnd, 65, freshWord, ms += 10);
+    touchUp(app, app.hwnd, 65, freshWord, ms += 30, false);
+    check(!app.hasSelection, "a tap after a pan starts a new click chain");
+    touchDown(app, app.hwnd, 66, freshWord, ms += 10);
+    touchUp(app, app.hwnd, 66, freshWord, ms += 30, true);
+    touchDown(app, app.hwnd, 67, freshWord, ms += 10);
+    touchUp(app, app.hwnd, 67, freshWord, ms += 30, false);
+    check(!app.hasSelection, "a canceled contact resets the text tap chain");
+
+    touchDown(app, app.hwnd, 68, freshWord, ms += 10);
+    enterEditMode(app);
+    touchHold(app, app.hwnd);
+    check(!app.touch.active && !app.editorHasSelection && !app.editCtxOpen,
+          "a delayed hold cannot select text after changing mode");
+    exitEditMode(app);
+    ensureLayoutComplete(app);
+    swipe(app, 69, low, 0, -20, 4, 10, 5);
+    check(app.touch.flinging && !app.touch.active, "a released gesture can still be flinging");
+    const float idleY = app.scrollY;
+    touchCancel(app, app.hwnd);
+    touchFlingStep(app, app.hwnd, ms += 100);
+    check(!app.touch.flinging && app.scrollY == idleY, "canceling without an active finger stops inertia too");
 
     // A mouse drag still selects
     app.scrollY = app.targetScrollY = 0;
@@ -315,6 +439,7 @@ void scenario(App& app, const char* path, int width, float scale) {
           "a pan on the preview takes the editor along" + where + ": page " + std::to_string(app.scrollY) +
               ", editor " + std::to_string(app.editorScrollY));
     editorHoldScenario(app);
+    controlRoutingScenario(app);
     exitEditMode(app);
 }
 }  // namespace
