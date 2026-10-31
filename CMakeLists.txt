@@ -148,6 +148,7 @@ target_link_libraries(tinta PRIVATE
     urlmon
     ole32
     imm32
+    runtimeobject
     d3d11
     dwmapi
     comdlg32

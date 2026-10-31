@@ -15,16 +15,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: upstream-baseline
-            ref: b48811841839af58d17861e65c258240b5cd4b16
-          - name: editor-hold-selection
-            ref: ae3de1e3c3084ac48e6300c5b4e8a3cd88f7d62d
-          - name: control-routing
-            ref: 5d6e326a368986cb7ee06485fb000552ae67bbd8
-          - name: fling-brake
-            ref: 24f48fc1dcd20cae960545eaba89c5ad11f8dde8
-          - name: gesture-lifecycle
-            ref: 0679ae9d8507801379ea0f124b99412eaa60349a
+          - name: split-preview-links
+            ref: 31eb70dc09c52b2386392a2ab6f1b583fd1a0d35
+          - name: exit-editor-menu
+            ref: 745a4d936b4ad5dab60d1adb3e715cde2b48ae61
+          - name: editor-keyboard
+            ref: 75f363d25511d33262ba915132b5fc6d07250ce7
           - name: combined
             ref: ''
     steps:
@@ -38,9 +34,9 @@ jobs:
           CFLAGS: /MP
           CXXFLAGS: /MP
       - name: Build app and input regression harnesses
-        run: cmake --build build --config Release --parallel --target tinta input_tests keymap_tests context_menu_tests
+        run: cmake --build build --config Release --parallel --target tinta input_tests keymap_tests context_menu_tests i18n_tests
       - name: Input regression tests
-        run: ctest --test-dir build -C Release --output-on-failure -R '^(keymap|context_menu|input_shortcuts|editor_features|editor_context_selection|wrapped_cursor_navigation|edit_preview_scroll_sync|search_input_focus|table_and_modifier_input|docked_preview_and_hints|window_drag_and_title_space|contents_and_panel_resize|split_scrollbars|editor_drag_move|touch_gestures|search_results_panel)$'
+        run: ctest --test-dir build -C Release --output-on-failure -R '^(keymap|context_menu|input_shortcuts|editor_features|editor_context_selection|wrapped_cursor_navigation|edit_preview_scroll_sync|search_input_focus|table_and_modifier_input|docked_preview_and_hints|window_drag_and_title_space|contents_and_panel_resize|split_scrollbars|editor_drag_move|touch_gestures|search_results_panel|file_fragment_navigation|i18n)$'
       - name: Test logs
         if: always()
         uses: actions/upload-artifact@v4

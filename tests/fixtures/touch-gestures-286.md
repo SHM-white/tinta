@@ -39,6 +39,23 @@ Switch focus or editing mode during a held press or fling: no delayed
 menu or scrolling should continue in the new context. Normal deliberate
 double and triple taps must still select words and lines.
 
+In split edit mode, tap **jump to the end** in the preview. Both panes
+should scroll, and the destination must remain visible on subsequent
+repaints. The source text, unsaved state and caret must remain unchanged.
+
+To leave split editing without a keyboard, tap the top-left application
+logo and choose **Exit editing**. A clean document returns to reading
+immediately. With unsaved edits, test **Keep editing** first; then choose
+Save or Discard deliberately. The document tab must stay open.
+
+On a Windows touch device with the hardware keyboard detached, enter
+split editing and tap the source text once: the caret should move and
+Windows should be asked to show its touch keyboard. Type English and
+Chinese, then try panning and holding text: neither gesture should reopen
+a dismissed keyboard. Mouse clicks must retain their normal behavior.
+Windows may decline the request depending on hardware and system policy;
+the taskbar's touch-keyboard button remains a manual fallback.
+
 | Bed 1 | Bed 2 | Bed 3 | Bed 4 | Bed 5 | Bed 6 | Bed 7 | Bed 8 | Bed 9 | Bed 10 | Bed 11 | Bed 12 | Bed 13 | Bed 14 | Bed 15 | Bed 16 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `12` cm | `24` cm | `36` cm | **Chard** | `60` cm | `72` cm | `84` cm | **Beans** | `108` cm | `120` cm | `132` cm | **Chard** | `156` cm | `168` cm | `180` cm | **Beans** |

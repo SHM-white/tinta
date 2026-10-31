@@ -7,6 +7,7 @@
 #include "editor.h"
 #include "editrail.h"
 #include "input.h"
+#include "keystroke.h"
 #include "overlays.h"
 #include "render.h"
 #include "selection.h"
@@ -440,7 +441,55 @@ void scenario(App& app, const char* path, int width, float scale) {
               ", editor " + std::to_string(app.editorScrollY));
     editorHoldScenario(app);
     controlRoutingScenario(app);
-    exitEditMode(app);
+
+    // A preview link must survive the following frames' source-to-preview sync.
+    app.editorScrollY = 0;
+    editFrame(app);
+    const auto sourceBeforeJump = app.editorText;
+    const bool dirtyBeforeJump = app.editorDirty;
+    const size_t caretBeforeJump = app.editorCursorPos;
+    tapAt(app, 70, wordPoint(app, L"jump to the end"));
+    check(app.editorScrollY > 0, "a preview anchor jump also moves the source viewport" + where);
+    editFrame(app);
+    editFrame(app);
+    check(app.scrollY > app.height && app.editorScrollY > 0,
+          "a preview anchor jump stays at its destination after repaint" + where);
+    check(app.editorText == sourceBeforeJump && app.editorDirty == dirtyBeforeJump &&
+              app.editorCursorPos == caretBeforeJump,
+          "preview link navigation does not edit source or move its caret" + where);
+
+    // The existing application menu provides a touch exit without bypassing
+    // the same unsaved-changes guard used by Esc.
+    auto exitThroughMenu = [&] {
+        openContextMenu(app, dpi(app, 4), chromeTopHeight(app), true);
+        const auto& entries = contextMenuEntries(app);
+        int row = -1;
+        for (int i = 0; i < (int)entries.size(); ++i)
+            if (entries[i].action == CTX_END_EDIT) row = i;
+        check(row >= 0, "editing application menu offers Exit editing");
+        if (row < 0) return;
+        const int x = (int)(app.contextMenuX + dpi(app, 20));
+        const int y = (int)(app.contextMenuY + contextMenuItemTop(app, row) + contextMenuItemHeight(app) / 2);
+        handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(x, y));
+        handleMouseUp(app, app.hwnd, 0, MAKELPARAM(x, y));
+    };
+    const auto pathBeforeExit = app.currentFile;
+    keystroke(app, 'X', {}, L'x');
+    const auto changedText = app.editorText;
+    check(app.editorDirty, "the exit-menu fixture has an unsaved edit");
+    exitThroughMenu();
+    check(app.editMode && app.confirmExitPending && app.editorText == changedText,
+          "Exit editing asks before discarding unsaved source");
+    confirmExitAction(app, app.hwnd, 3);
+    check(app.editMode && app.editorDirty && !app.confirmExitPending,
+          "Keep editing cancels the menu exit");
+    exitThroughMenu();
+    confirmExitAction(app, app.hwnd, 2);
+    check(!app.editMode && app.currentFile == pathBeforeExit, "discard returns to the same document's reader");
+    enterEditMode(app);
+    exitThroughMenu();
+    check(!app.editMode && !app.confirmExitPending && app.currentFile == pathBeforeExit,
+          "a clean editor closes directly from the application menu");
 }
 }  // namespace
 
@@ -450,6 +499,8 @@ int runTouchTests(const char* path) {
     app.hwnd = CreateWindowExW(0, L"STATIC", L"Touch tests", WS_POPUP, 0, 0, 1050, 800,
                                nullptr, nullptr, nullptr, nullptr);
     if (!app.hwnd || !initD2D(app) || !createRenderTarget(app)) return 2;
+    check(!requestTouchKeyboard(nullptr), "a missing window never requests the system keyboard");
+    check(!requestTouchKeyboard(app.hwnd), "a hidden test window cannot take over the system keyboard");
     Settings settings;
     settings.keyProfile = "windows";
     applyKeymap(app, settings);
