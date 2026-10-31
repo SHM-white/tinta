@@ -6,6 +6,7 @@
 #include "d2d_init.h"
 #include "editor.h"
 #include "input.h"
+#include "keystroke.h"
 #include "overlays.h"
 #include "render.h"
 #include "selection.h"
@@ -273,7 +274,38 @@ void scenario(App& app, const char* path, int width, float scale) {
     check(app.editorScrollY > 0 && std::fabs(app.scrollY - 300) <= dpi(app, 90),
           "a pan on the preview takes the editor along" + where + ": page " + std::to_string(app.scrollY) +
               ", editor " + std::to_string(app.editorScrollY));
-    exitEditMode(app);
+    // The existing application menu provides a touch exit without bypassing
+    // the same unsaved-changes guard used by Esc.
+    auto exitThroughMenu = [&] {
+        openContextMenu(app, dpi(app, 4), chromeTopHeight(app), true);
+        const auto& entries = contextMenuEntries(app);
+        int row = -1;
+        for (int i = 0; i < (int)entries.size(); ++i)
+            if (entries[i].action == CTX_END_EDIT) row = i;
+        check(row >= 0, "editing application menu offers Exit editing");
+        if (row < 0) return;
+        const int x = (int)(app.contextMenuX + dpi(app, 20));
+        const int y = (int)(app.contextMenuY + contextMenuItemTop(app, row) + contextMenuItemHeight(app) / 2);
+        handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(x, y));
+        handleMouseUp(app, app.hwnd, 0, MAKELPARAM(x, y));
+    };
+    const auto pathBeforeExit = app.currentFile;
+    keystroke(app, 'X', {}, L'x');
+    const auto changedText = app.editorText;
+    check(app.editorDirty, "the exit-menu fixture has an unsaved edit");
+    exitThroughMenu();
+    check(app.editMode && app.confirmExitPending && app.editorText == changedText,
+          "Exit editing asks before discarding unsaved source");
+    confirmExitAction(app, app.hwnd, 3);
+    check(app.editMode && app.editorDirty && !app.confirmExitPending,
+          "Keep editing cancels the menu exit");
+    exitThroughMenu();
+    confirmExitAction(app, app.hwnd, 2);
+    check(!app.editMode && app.currentFile == pathBeforeExit, "discard returns to the same document's reader");
+    enterEditMode(app);
+    exitThroughMenu();
+    check(!app.editMode && !app.confirmExitPending && app.currentFile == pathBeforeExit,
+          "a clean editor closes directly from the application menu");
 }
 }  // namespace
 
