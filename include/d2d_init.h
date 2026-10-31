@@ -22,6 +22,14 @@ void useUiFontFallback(const App& app, IDWriteTextLayout* layout);
 // family itself when it has them, else the first installed CJK face of the
 // document fallback. Word export names it as the East Asian font (#256).
 std::wstring documentCjkFamily(App& app, const wchar_t* family);
+// A face this PC lacks gives way to an installed one: for code the nearest
+// of Cascadia Mono, Cascadia Code and Consolas, for text Segoe UI. Windows
+// 10 has no Cascadia Code, and without the face DirectWrite drew every
+// character from the fallback list, in no fixed pitch (#264).
+const wchar_t* installedFace(App& app, const wchar_t* face, bool mono);
+// The theme's body, heading and code faces as installedFace gives them; a
+// heading face this PC lacks leaves the headings to the body's
+void useInstalledFaces(App& app, D2DTheme& theme);
 void createTypography(App& app);
 bool createRenderTarget(App& app);
 

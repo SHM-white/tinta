@@ -133,3 +133,42 @@ clipboard, which held an image, was not touched): 2 hyperlinks, to
 link not one of them, and italic runs on exactly "italic words", "italic"
 and the bold "bold italic". Opening a file takes Word's HTML import as a
 paste does, but it is not the paste itself.
+
+## Lists (#290, merged 2026-10-29)
+
+sebvannistel's #290 pastes list items as lists: `<ul>` and `<ol>` with
+nesting and start numbers, task items as indented paragraphs with their
+checkbox character (Word puts a bullet before every `<li>`), and an item's
+text ends its line before a nested list in the plain text too. Merged, the
+full suite passed 50 of 50, and Word 16.0.20527 opened the copy of the
+fixture with real bullet, numbered and nested lists.
+
+The spacing in Word was uneven, though. The copy kept the empty line before
+a list but dropped the one after, while Word gives each list its own
+spacing (5 pt before the first item and after the last, auto). A list sat
+two lines below the paragraph above it and one above the next, and a task
+line split its list (`* Buy groceries`, `* [x] Buy milk`, `* Drive home`)
+into three blocks with gaps between them. Of four variants opened in Word,
+the one that keeps the empty lines on both sides and gives the lists and
+items zero top and bottom margins spaced everything evenly. Zero margins on
+the items alone were enough for Word; the lists get them too, so a
+browser's own 1em list margin stays off in web mail.
+
+The copy now does that: the empty lines after a list wait, go between the
+items of one list, and stand as one empty line before anything else, a new
+list included. The fixture gained a list that ends inside a nested one,
+which closes with one empty line rather than one per item. `rich_copy`
+checks the new markup; the merged code fails 20 of its checks (10 at each
+width).
+
+The built app's copy of the fixture (Ctrl+A and Ctrl+C posted to an
+isolated portable copy; the clipboard's text was saved first and put back,
+checked by hash) was pasted into a new Word document through COM: every
+list item and task line had 0 pt before and after, each list one empty
+paragraph on either side, nested items sat at 72 pt, and "Go" was
+numbered 2. Evidence is in `out/check-1029/pr290/` (ignored).
+
+- Outlook (classic and new) and web mail were not checked; classic Outlook
+  pastes through Word's editor.
+- Each copied line looks through the list items before it to find its own,
+  which grows with very long lists (as merged).

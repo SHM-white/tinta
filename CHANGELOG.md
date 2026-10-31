@@ -1,5 +1,44 @@
 # Changelog
 
+## [v3.9.6] - 2026-10-31
+
+### Security
+- Images, wiki links and file references on another computer's share (`\\server\share\...`, however the path is written) open only in a document from that same server, since opening the share signs in to it with your Windows credentials. Anywhere else an image shows the note "network path not opened" in the viewer, in print and in the HTML and Word exports. Files on this computer and on a share mapped to a drive letter open as before
+
+### Fixed
+- Tables, code blocks, quotes and other blocks inside list items render where they are written, with their own layout; a table in a list showed its cells as run-together text, and the item's text came out of order. A heading that starts a list item lines up with its number, bullet or checkbox and stays with it at a page break, and raw HTML list items without a closing `</li>` stay separate items. Contributed by @shinfd (#292)
+- Local images whose path holds percent escapes, such as `folder%20with%20space/image.png`, show in the viewer and in the HTML and Word exports instead of a placeholder. Reported and contributed by @tferi99 (#293, #294)
+- Documents in different folders that show an image of the same name, such as `shot.png`, each show their own; the second showed the first one's image while it stayed cached
+- Lists, quotes and emphasis nested a thousand or more levels deep no longer crash Tinta when it shows, prints, exports or copies them. Lists now nest up to 50 levels and quotes up to 100, and anything deeper goes on at the deepest level with all its text
+- A file that starts with a UTF-8 byte order mark, which Windows PowerShell 5.1 and Visual Studio write, reads its first line properly: a heading there showed as the literal `# Title`, a table, list or code fence there was misread, and front matter left an empty line under the properties. Editing and saving keep the mark
+- Text written directly inside a raw HTML `<blockquote>`, without a `<p>` around it, shows in the quote; it was missing from the page, print and copies. The Word export keeps it as one quote paragraph with its bold, links and line breaks, and an `<a id>` right inside such a quote works as a link target
+
+## [v3.9.5] - 2026-10-29
+
+### Added
+- Selected text in the editor can be dragged to another place to move it, or with Ctrl held as you let go, to leave a copy there. A caret shows where it will land, the editor scrolls when you drag past its top or bottom edge, one Ctrl+Z undoes it, and the text stays selected. A plain click on a selection still places the caret, and Esc cancels a drag. Requested by @nokia5118 (#289)
+- Copying from the viewer pastes lists as lists in Outlook and Word: bullet and numbered lists keep their nesting and start numbers, task items paste with their checkboxes, and each list keeps one empty line above and below it. Contributed by @sebvannistel (#290)
+
+### Fixed
+- A theme font that isn't installed gives way to one that is: Midnight and Arctic use Cascadia Code, which Windows 10 doesn't have. The editor and code blocks fell back to a font that isn't monospaced and that shows √ as Ã, ∞ as ° and ≠ not at all; code now takes Cascadia Mono or Consolas, and maths signs never come from the emoji font. Reported by @a86022 (#264)
+- The editor's scrollbar stays below the tab bar instead of sliding under it, and beside the editor the preview no longer jumps ahead while the editor's top lines are front matter or a first heading; it moves down from the top of the page. Reported by @go4399 (#291)
+
+## [v3.9.4] - 2026-10-28
+
+### Added
+- Touch: drag a finger to scroll the document, the editor and the side panels, and flick to keep it moving. A tap clicks, and pressing and holding selects a word, sliding to extend the selection; lifting the finger opens the context menu. Requested by @SHM-white (#286)
+- Copying from the viewer keeps bold, italics and web links for rich paste targets such as Outlook, Word and web mail, and each line pastes as its own paragraph. In Outlook and Word the text takes Outlook's compose font. Contributed by @sebvannistel (#285)
+- Front-matter dates, relative times and counts read in the interface language: a calendar date in the language's own short form (3. Jan 2026, 3 janv. 2026, 2026年1月3日), in your regional format when that is in the same language, and "3 days ago" or "5 items" with the plural the number takes. The start page's dates for recent files follow the language too
+
+### Fixed
+- Dragging the document's scrollbar follows the pointer along the whole track instead of being offset by the title bar, and the scrollbars of the Contents panel, the file browser and the search results can be dragged. Reported by @SHM-white (#287)
+- Opening the theme editor shows the theme's font in the font list instead of the top of the list. Reported by @go4399 (#284)
+- "Keep deleted files in memory" and its hint read in every language. Contributed by @go4399 (#283)
+- Every interface string has its Chinese, Japanese, Korean, German, French and Italian text. In Korean the search counter shows the current match before the total, and the French "Non" in the frontmatter settings is no longer cut off
+- Copy and Cut wait a moment when another program, such as Remote Desktop or clipboard history, holds the clipboard. If it stays busy, Tinta says "Clipboard busy — nothing copied" instead of "Copied!", and Cut keeps the text
+- Nested Obsidian and Typora spans render, as in `~~struck x^2^~~`, `==marked H~2~O==` and `x^a~i~^`; their inner `^`, `~` and `==` showed as text before
+- A highlight that holds a superscript, a subscript, struck words, a link or an equation is one even band, without darker strips or pale gaps where its pieces meet
+
 ## [v3.9.3] - 2026-10-26
 
 ### Fixed

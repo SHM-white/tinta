@@ -50,6 +50,7 @@ inline int64_t usElapsed(Clock::time_point start) {
 #define TIMER_TAB_HOVER_CARD 13
 #define TIMER_TOUCH_HOLD 14
 #define TIMER_TOUCH_FLING 15
+#define TIMER_EDITOR_DRAG_SCROLL 16
 
 // Posted to continue an incomplete document layout in time-budgeted chunks
 #define WM_APP_LAYOUT_CHUNK (WM_APP + 1)
@@ -348,6 +349,7 @@ struct App {
         int height = 0;
         bool failed = false;
         bool pending = false;  // remote image download in flight
+        bool blocked = false;  // on another computer's share, left unopened
         size_t bytes = 0;      // estimated decoded bitmap memory
         unsigned long long lastUsed = 0;
     };
@@ -533,6 +535,7 @@ struct App {
         std::optional<std::string> viewerSource;
         FILETIME lastWrite{};      // for external-change conflicts (dirty tabs)
         std::wstring editorText;   // parked edit buffer (editMode only)
+        bool editorBom = false;    // its file starts with a byte order mark
         float editorScrollY = 0.0f;
         size_t editorCursor = 0;
         bool wordWrap = true;
@@ -636,6 +639,18 @@ struct App {
     bool editorScrollbarDragging = false;
     float editorScrollbarDragStartY = 0.0f;
     float editorScrollbarDragStartScroll = 0.0f;
+    // The selection dragged to move it, or with Ctrl to copy it (#289):
+    // armed by a press on the selection, a drag once the pointer passes
+    // the system's drag distance
+    struct EditorTextDrag {
+        bool armed = false;
+        bool active = false;
+        int startX = 0, startY = 0;
+        int x = 0, y = 0;            // the pointer, for the edge scrolling
+        size_t pressPos = 0;         // a click without a drag puts the caret here
+        size_t dropPos = SIZE_MAX;   // where the text lands; SIZE_MAX off the text
+        float scrollVel = 0.0f;      // edge scrolling per timer tick
+    } editorTextDrag;
     // Only the primary window persists the tab session; satellites
     // (--cascade/--new/drag-outs) neither restore nor overwrite it
     bool sessionOwner = true;
@@ -1135,6 +1150,17 @@ struct App {
     std::vector<std::pair<size_t, size_t>> docItalicRanges;
     struct DocLinkRange { size_t start, end; std::string url; };
     std::vector<DocLinkRange> docLinkRanges;
+    // docText ranges of list items, in document order (a nested item
+    // follows its parent and lies inside it), so a copy pastes real lists
+    struct DocListItem {
+        size_t start, end;
+        int depth;       // 0 for a top-level list
+        bool ordered;
+        int number;      // an ordered item's number
+        int task;        // 0 no checkbox, 1 open, 2 done
+        const void* list;  // the list it belongs to: items of one list share it
+    };
+    std::vector<DocListItem> docListItems;
 
     // Cached space widths for common formats
     float spaceWidthText = 0.0f;
@@ -1396,6 +1422,9 @@ struct App {
     // Editor document
     std::wstring editorText;
     bool editorDirty = false;
+    // The file starts with a UTF-8 byte order mark. The mark stays out of
+    // editorText, so the caret never sits before it, and saves write it back.
+    bool editorBom = false;
     std::vector<size_t> editorLineStarts;
     float editorScrollX = 0.0f;  // horizontal scroll, non-wrap mode only (#77)
 
@@ -1533,6 +1562,7 @@ struct App {
         docBoldRanges.clear();
         docItalicRanges.clear();
         docLinkRanges.clear();
+        docListItems.clear();
         headings.clear();
         headingSlugCounts.clear();
         footnoteAnchors.clear();

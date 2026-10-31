@@ -39,6 +39,11 @@ void handleEditorMouseDown(App& app, HWND hwnd, int x, int y);
 void handleEditorMouseUp(App& app, HWND hwnd, int x, int y);
 void handleEditorMouseMove(App& app, HWND hwnd, int x, int y);
 void handleEditorMouseWheel(App& app, HWND hwnd, float delta);
+// A dragged selection (#289): TIMER_EDITOR_DRAG_SCROLL scrolls the editor
+// while the pointer is past its top or bottom edge; Esc, a lost capture or
+// a cancelled mode put the drag away and leave the text as it was
+void editorTextDragScroll(App& app, HWND hwnd);
+void editorTextDragCancel(App& app, HWND hwnd);
 
 // Editor rendering
 void renderEditor(App& app, float editorWidth);
@@ -46,9 +51,10 @@ void renderEditor(App& app, float editorWidth);
 bool editorCaretPoint(App& app, D2D1_POINT_2F& point);
 
 // Re-enter edit mode from a parked tab buffer (tabs.cpp), restoring the
-// dirty flag, scroll, and caret the switch-away captured
+// dirty flag, scroll, and caret the switch-away captured; bom when the
+// buffer's file starts with a byte order mark
 void restoreEditBuffer(App& app, const std::wstring& text, bool dirty,
-                       float scrollY, size_t cursor);
+                       float scrollY, size_t cursor, bool bom = false);
 
 // Quick-note empty state (design 4a): an untitled buffer with no text yet
 // shows a centered "Open a file" button in the preview pane until typing

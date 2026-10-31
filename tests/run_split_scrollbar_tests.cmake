@@ -8,7 +8,14 @@ file(WRITE "${TEST_DIR}/settings.ini" "[Settings]\nhasAskedFileAssociation=1\nch
 file(COPY "${TEST_DOC}" DESTINATION "${TEST_DIR}")
 get_filename_component(TEST_NAME "${TEST_BINARY}" NAME)
 get_filename_component(TEST_DOC_NAME "${TEST_DOC}" NAME)
-execute_process(COMMAND "${TEST_DIR}/${TEST_NAME}" --split-scrollbar-tests "${TEST_DIR}/${TEST_DOC_NAME}"
+# A second document with front matter, when given (#291)
+set(TEST_DOC2_ARG "")
+if(DEFINED TEST_DOC2)
+    file(COPY "${TEST_DOC2}" DESTINATION "${TEST_DIR}")
+    get_filename_component(TEST_DOC2_NAME "${TEST_DOC2}" NAME)
+    set(TEST_DOC2_ARG "${TEST_DIR}/${TEST_DOC2_NAME}")
+endif()
+execute_process(COMMAND "${TEST_DIR}/${TEST_NAME}" --split-scrollbar-tests "${TEST_DIR}/${TEST_DOC_NAME}" ${TEST_DOC2_ARG}
     WORKING_DIRECTORY "${TEST_DIR}" RESULT_VARIABLE result)
 if(NOT result EQUAL 0)
     message(FATAL_ERROR "Split scrollbar tests failed: ${result}")

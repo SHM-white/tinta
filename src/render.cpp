@@ -9,6 +9,9 @@
 #include "mermaid_ext.h"
 #include "math_render.h"
 #include "image_loader.h"
+#include "i18n.h"
+#include "link_target.h"
+#include "network_path.h"
 #include "plantuml_app.h"
 #include "plantuml_queue.h"
 
@@ -218,6 +221,9 @@ static void rollbackTo(App& app, const LayoutSnapshot& s) {
     auto& links = app.docLinkRanges;
     while (!links.empty() && links.back().start >= s.docTextLen) links.pop_back();
     if (!links.empty()) links.back().end = std::min(links.back().end, s.docTextLen);
+    auto& items = app.docListItems;
+    while (!items.empty() && items.back().start >= s.docTextLen) items.pop_back();
+    for (auto& item : items) item.end = std::min(item.end, s.docTextLen);
     app.taskRects.resize(s.tasks);
     app.htmlAnchors.resize(s.anchors);  // a trial layout's anchors sit at trial positions
 }
@@ -470,6 +476,13 @@ static float runBaseline(App& app, IDWriteTextLayout* layout, IDWriteTextFormat*
     return baseline >= 0.0f ? baseline : formatBaseline(app, format);
 }
 
+// The ==highlight== an inline element sits in, if any
+static const Element* highlightSpanOf(const Element* elem) {
+    for (; elem; elem = elem->parent)
+        if (elem->type == ElementType::Highlight) return elem;
+    return nullptr;
+}
+
 static void layoutInlineContent(App& app, const std::vector<ElementPtr>& elements,
                                 float startX, float& y, float maxWidth,
                                 IDWriteTextFormat* baseFormat, D2D1_COLOR_F baseColor,
@@ -582,6 +595,42 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
     }
     lineHeight += mathTextOffset + mathBelow;
 
+    // A highlight is drawn in pieces, one per text segment and math box,
+    // each padded 2 px on both sides. Its colour is translucent, so pieces
+    // that meet on a line (==x^2^==, ==a $x$ b==) join rather than overlap
+    // into a darker strip. Pieces of one highlight also bridge the space
+    // between their runs; separate highlights only stop overlapping. Pieces
+    // of equal height merge into one band. Beside a taller math box the text
+    // band ends at the box, which keeps its full height.
+    size_t bgPiece = SIZE_MAX;  // the latest piece, in layoutRects
+    float bgPieceY = 0.0f;
+    const Element* bgPieceSpan = nullptr;
+    bool bgSpanBroken = false;  // a code chip, ruby or image came since
+    auto addHighlight = [&](D2D1_RECT_F rect, D2D1_COLOR_F color, const Element* span) {
+        if (bgPiece < app.layoutRects.size() && bgPieceY == y) {
+            D2D1_RECT_F& prev = app.layoutRects[bgPiece].rect;
+            if ((span && span == bgPieceSpan && !bgSpanBroken) || rect.left < prev.right) {
+                bgPieceSpan = span;
+                bgSpanBroken = false;
+                if (rect.top == prev.top && rect.bottom == prev.bottom) {
+                    prev.right = std::max(prev.right, rect.right);
+                    return;
+                }
+                // A whole-pixel joint leaves no antialiased seam on screen
+                bool taller = rect.top <= prev.top && rect.bottom >= prev.bottom;
+                float joint = std::round(taller ? rect.left : prev.right);
+                prev.right = std::max(prev.left, joint);
+                rect.left = joint;
+                if (rect.right <= rect.left) return;
+            }
+        }
+        bgPiece = app.layoutRects.size();
+        bgPieceY = y;
+        bgPieceSpan = span;
+        bgSpanBroken = false;
+        app.layoutRects.push_back({rect, color});
+    };
+
     for (size_t runIndex = 0; runIndex < runs.size(); runIndex++) {
         const auto& run = runs[runIndex];
         const ElementPtr& elem = run.elem;
@@ -601,6 +650,10 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         linkUnderInsertion = hasUnderline;
         if (!hasUnderline) underlineEndX = -1.0f;
         D2D1_COLOR_F bgColor = run.style.bgColor;
+        const Element* bgSpan = hasBg ? highlightSpanOf(elem.get()) : nullptr;
+        // These draw no highlight, so the band does not bridge across them
+        if (elem->type == ElementType::Code || elem->type == ElementType::Ruby ||
+            elem->type == ElementType::Image) bgSpanBroken = true;
         float drawYOffset = run.style.drawYOffset + mathTextOffset;
         bool wrappedCode = false;
 
@@ -694,10 +747,10 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 float textBaseline = mathBaselines[runIndex];
                 float boxTop = y + drawYOffset + textBaseline - mathBoxBaseline(box);
                 if (hasBg) {
-                    app.layoutRects.push_back({D2D1::RectF(x - 2,
+                    addHighlight(D2D1::RectF(x - 2,
                         std::min(boxTop, y + mathTextOffset + 1), x + w + 2,
                         std::max(boxTop + mathBoxHeight(box), y + mathTextOffset + normalLineHeight - 1)),
-                        bgColor});
+                        bgColor, bgSpan);
                 }
                 if (hasStrike) {
                     float strikeY = y + mathTextOffset + normalLineHeight * 0.55f;
@@ -923,10 +976,9 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                         codeBox});
                 }
             } else if (hasBg) {
-                app.layoutRects.push_back({
-                    D2D1::RectF(segX - 2, y + mathTextOffset + 1, segX + segWidth + 2,
-                                y + mathTextOffset + normalLineHeight - 1),
-                    bgColor});
+                addHighlight(D2D1::RectF(segX - 2, y + mathTextOffset + 1, segX + segWidth + 2,
+                                         y + mathTextOffset + normalLineHeight - 1),
+                             bgColor, bgSpan);
             }
             if (hasStrike) {
                 float strikeY = y + mathTextOffset + normalLineHeight * 0.55f;
@@ -1114,10 +1166,7 @@ static const ElementPtr* soleMathDisplayChild(const ElementPtr& elem) {
     return found;
 }
 
-// Inline content of nothing but empty anchors (<a id="x"></a> on its own
-// line above a heading) only marks link targets. Like a browser's empty
-// paragraph it takes no room; the targets pin to where it would start (#255).
-static bool pinAnchorsOnly(App& app, const std::vector<ElementPtr>& children, float y) {
+static bool isAnchorOnlyContent(const std::vector<ElementPtr>& children) {
     bool anchor = false;
     for (const auto& child : children) {
         if (!child) continue;
@@ -1131,7 +1180,14 @@ static bool pinAnchorsOnly(App& app, const std::vector<ElementPtr>& children, fl
             return false;
         }
     }
-    if (!anchor) return false;
+    return anchor;
+}
+
+// Inline content of nothing but empty anchors (<a id="x"></a> on its own
+// line above a heading) only marks link targets. Like a browser's empty
+// paragraph it takes no room; the targets pin to where it would start (#255).
+static bool pinAnchorsOnly(App& app, const std::vector<ElementPtr>& children, float y) {
+    if (!isAnchorOnlyContent(children)) return false;
     for (const auto& child : children) {
         if (child && child->type == ElementType::Anchor) {
             app.htmlAnchors.push_back({child->title, y});
@@ -1151,6 +1207,19 @@ static void layoutParagraph(App& app, const ElementPtr& elem, float& y, float in
     app.docText += L"\n\n";
     float scale = app.contentScale * app.zoomFactor;
     y += 14 * scale;
+}
+
+// Inline content outside any paragraph, the bare text of a raw HTML block
+// or <blockquote>, lays out as a paragraph would. Empties the run.
+static void layoutInlineRun(App& app, std::vector<ElementPtr>& run, float& y, float indent, float maxWidth) {
+    if (run.empty()) return;
+    if (!pinAnchorsOnly(app, run, y)) {
+        layoutInlineContent(app, run, indent, y, maxWidth, app.textFormat, app.theme.text);
+        app.docText += L"\n\n";
+        float scale = app.contentScale * app.zoomFactor;
+        y += 14 * scale;
+    }
+    run.clear();
 }
 
 static void layoutHeading(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
@@ -2281,7 +2350,11 @@ static bool layoutMermaidExtDiagram(App& app, mermaidext::Kind kind,
     return true;
 }
 
-static App::ImageEntry& getOrLoadImage(App& app, const std::string& src);
+// A document's image is checked against the document's folder before it
+// opens (network_path.h); Tinta's own files, such as a rendered PlantUML
+// diagram, pass fromDocument = false
+static App::ImageEntry& getOrLoadImage(App& app, const std::string& src,
+                                       bool fromDocument = true);
 
 // UTF-8 form of a wide string (the PlantUML preamble and the image cache
 // key are narrow; render.cpp has no toUtf8 dependency)
@@ -2425,7 +2498,7 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
                 // the mermaid 2x convention); scaling is exact math, so a
                 // fit computes one scale instead of the 4-pass loop.
                 auto layOutPng = [&](const std::wstring& pngPath) -> bool {
-                    auto& image = getOrLoadImage(app, wideToUtf8(pngPath));
+                    auto& image = getOrLoadImage(app, wideToUtf8(pngPath), false);
                     if (image.failed || !image.bitmap) return false;
                     const float scale = app.contentScale * app.zoomFactor;
                     const bool fitActive = fitBlockEnabled(app, fitKey);
@@ -2650,6 +2723,36 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
     y += blockHeight + 14 * scale;
 }
 
+static bool isInlineElement(ElementType type) {
+    switch (type) {
+        case ElementType::Text:
+        case ElementType::Code:
+        case ElementType::Emphasis:
+        case ElementType::Strong:
+        case ElementType::Link:
+        case ElementType::Image:
+        case ElementType::SoftBreak:
+        case ElementType::HardBreak:
+        case ElementType::Ruby:
+        case ElementType::RubyText:
+        case ElementType::Anchor:
+        case ElementType::FootnoteReference:
+        case ElementType::FootnoteBacklink:
+        case ElementType::Highlight:
+        case ElementType::Superscript:
+        case ElementType::Subscript:
+        case ElementType::Strikethrough:
+        case ElementType::Underline:
+        case ElementType::MathInline:
+            return true;
+        case ElementType::MathDisplay:
+            // Tight lists expose $$...$$ directly; route it through inline layout.
+            return true;
+        default:
+            return false;
+    }
+}
+
 static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     float scale = app.contentScale * app.zoomFactor;
     float quoteIndent = 20.0f * scale;
@@ -2688,9 +2791,20 @@ static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float i
         y += 30 * scale;
     }
 
+    // A raw HTML quote can hold its text bare, with no <p> around it
+    // (<blockquote>Text <b>bold</b></blockquote>), and layoutElement drew
+    // nothing for it. Each run of inline children is a paragraph, in
+    // source order with the blocks around it.
+    std::vector<ElementPtr> inlineRun;
     for (const auto& child : elem->children) {
+        if (isInlineElement(child->type)) {
+            inlineRun.push_back(child);
+            continue;
+        }
+        layoutInlineRun(app, inlineRun, y, indent + quoteIndent, maxWidth - quoteIndent);
         layoutElement(app, child, y, indent + quoteIndent, maxWidth - quoteIndent);
     }
+    layoutInlineRun(app, inlineRun, y, indent + quoteIndent, maxWidth - quoteIndent);
 
     // Child layout advances y past its trailing margin. Keep that spacing
     // outside the bar, without moving the next block. Use retained content
@@ -2716,13 +2830,47 @@ static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float i
     app.layoutRects.push_back({D2D1::RectF(indent, startY, indent + 4, std::min(y, contentBottom)), barColor});
 }
 
+// HTML wrappers and anchor-only content do not determine a list marker's baseline.
+static const Element* firstListContent(const std::vector<ElementPtr>& children) {
+    for (size_t i = 0; i < children.size();) {
+        const auto& child = children[i];
+        if (isInlineElement(child->type)) {
+            std::vector<ElementPtr> inlineElements;
+            do {
+                inlineElements.push_back(children[i++]);
+            } while (i < children.size() && isInlineElement(children[i]->type));
+            if (!isAnchorOnlyContent(inlineElements)) return inlineElements.front().get();
+        } else {
+            ++i;
+            if (child->type == ElementType::Paragraph && isAnchorOnlyContent(child->children)) continue;
+            if (child->type != ElementType::HtmlBlock) return child.get();
+            if (const auto* first = firstListContent(child->children)) return first;
+        }
+    }
+    return nullptr;
+}
+
 static void layoutList(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     float scale = app.contentScale * app.zoomFactor;
     float listIndent = 24.0f * scale;
     int itemNum = elem->start;
+    // How deep this list sits in other lists, for the copy's nesting
+    static int listDepth = 0;
+    struct DepthScope {
+        DepthScope() { listDepth++; }
+        ~DepthScope() { listDepth--; }
+    } depthScope;
 
     for (const auto& child : elem->children) {
         if (child->type != ElementType::ListItem) continue;
+
+        const LayoutSnapshot markerStart = takeSnapshot(app);
+        size_t markerIndex = SIZE_MAX;
+        size_t listItem = app.docListItems.size();
+        app.docListItems.push_back({app.docText.size(), app.docText.size(), listDepth - 1,
+                                    elem->ordered, itemNum,
+                                    child->isTask ? (child->taskChecked ? 2 : 1) : 0,
+                                    elem.get()});
 
         if (child->isTask) {
             // Task item: a clickable checkbox replaces the bullet
@@ -2763,47 +2911,70 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
             LayoutInfo info = createLayout(app, marker, app.textFormat, 24.0f, app.bodyTypography);
             D2D1_POINT_2F pos = D2D1::Point2F(indent, y);
             D2D1_RECT_F bounds = D2D1::RectF(indent, y, indent + listIndent, y + 24);
+            if (info.layout) markerIndex = app.layoutTextRuns.size();
             addTextRun(app, std::move(info), pos, bounds, app.theme.text, 0, 0, false);
         }
 
-        bool hasBlockChildren = false;
+        const LayoutSnapshot contentStart = takeSnapshot(app);
+        const size_t headingStart = app.headings.size();
+        float itemStartY = y;
+
+        // MD4C omits paragraph wrappers in tight lists.
+        // Hence list items can mix direct inline children with block children.
+        std::vector<ElementPtr> inlineElements;
         for (const auto& itemChild : child->children) {
-            if (itemChild->type == ElementType::Paragraph ||
-                itemChild->type == ElementType::List ||
-                itemChild->type == ElementType::CodeBlock ||
-                itemChild->type == ElementType::BlockQuote) {
-                hasBlockChildren = true;
-                break;
+            if (isInlineElement(itemChild->type)) {
+                inlineElements.push_back(itemChild);
+            } else {
+                if (!inlineElements.empty()) {
+                    if (!pinAnchorsOnly(app, inlineElements, y)) {
+                        layoutInlineContent(app, inlineElements, indent + listIndent, y,
+                            maxWidth - listIndent, app.textFormat, app.theme.text);
+                        // The item's text ends its line before a nested list, as
+                        // on screen (a copy read "Water it.morning")
+                        app.docText += L"\n";
+                    }
+                    inlineElements.clear();
+                }
+                layoutElement(app, itemChild, y, indent + listIndent, maxWidth - listIndent);
             }
         }
-
-        float itemStartY = y;
-        if (hasBlockChildren) {
-            std::vector<ElementPtr> inlineElements, blockElements;
-            for (const auto& itemChild : child->children) {
-                if (itemChild->type == ElementType::Paragraph ||
-                    itemChild->type == ElementType::List ||
-                    itemChild->type == ElementType::CodeBlock ||
-                    itemChild->type == ElementType::BlockQuote) {
-                    blockElements.push_back(itemChild);
-                } else {
-                    inlineElements.push_back(itemChild);
-                }
-            }
-
-            if (!inlineElements.empty()) {
-                layoutInlineContent(app, inlineElements, indent + listIndent, y,
-                    maxWidth - listIndent, app.textFormat, app.theme.text);
-            }
-
-            for (const auto& blockChild : blockElements) {
-                layoutElement(app, blockChild, y, indent + listIndent, maxWidth - listIndent);
-            }
-        } else {
-            layoutInlineContent(app, child->children, indent + listIndent, y,
+        if (!inlineElements.empty() && !pinAnchorsOnly(app, inlineElements, y)) {
+            layoutInlineContent(app, inlineElements, indent + listIndent, y,
                 maxWidth - listIndent, app.textFormat, app.theme.text);
         }
 
+        const auto* first = firstListContent(child->children);
+        if (headingStart < app.headings.size() && first && first->type == ElementType::Heading) {
+            // Move only the marker: keep heading margins and align to the main
+            // text baseline, even when the heading starts with a raised script.
+            auto format = app.headingFormats[first->level - 1];
+            float headingBaseline = app.headings[headingStart].y + formatBaseline(app, format ? format : app.textFormat);
+            if (child->isTask) {
+                float shift = headingBaseline - itemStartY - formatBaseline(app, app.textFormat);
+                // Move only this checkbox, including its hit region; nested content stays put.
+                for (size_t i = markerStart.rects; i < contentStart.rects; ++i) {
+                    app.layoutRects[i].rect.top += shift;
+                    app.layoutRects[i].rect.bottom += shift;
+                }
+                for (size_t i = markerStart.lines; i < contentStart.lines; ++i) {
+                    app.layoutLines[i].p1.y += shift;
+                    app.layoutLines[i].p2.y += shift;
+                }
+                for (size_t i = markerStart.tasks; i < contentStart.tasks; ++i) {
+                    app.taskRects[i].rect.top += shift;
+                    app.taskRects[i].rect.bottom += shift;
+                }
+            } else if (markerIndex < app.layoutTextRuns.size()) {
+                auto& marker = app.layoutTextRuns[markerIndex];
+                float shift = headingBaseline - marker.pos.y - layoutBaseline(marker.layout);
+                marker.pos.y += shift;
+                marker.bounds.top += shift;
+                marker.bounds.bottom += shift;
+            }
+        }
+
+        if (listItem < app.docListItems.size()) app.docListItems[listItem].end = app.docText.size();
         app.docText += L"\n\n";
 
         if (y < itemStartY + 28 * scale) {
@@ -3005,8 +3176,49 @@ static bool loadSvgBitmap(App& app, const std::wstring& path,
     return !entry.failed;
 }
 
-static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
-    auto it = app.imageCache.find(src);
+static App::ImageEntry& getOrLoadImage(App& app, const std::string& src, bool fromDocument) {
+    // Remote images load on a worker thread — a synchronous download here
+    // stalled layout for seconds per unreachable URL (#44)
+    bool isUrl = (src.rfind("http://", 0) == 0 || src.rfind("https://", 0) == 0);
+
+    std::wstring widePath;
+    std::wstring folder;
+    if (!isUrl) {
+        // Resolve relative to the current file's directory. Both strings are
+        // UTF-8 and must be widened explicitly: a narrow filesystem::path
+        // decodes through the ANSI codepage and mangles non-ASCII paths (#87)
+        // Decode URL escapes once before converting UTF-8 to a native path
+        // (#293). Remote URLs keep their original encoding.
+        std::wstring wsrc = toWide(qmd::decodeLinkComponent(src));
+        if (!app.currentFile.empty()) {
+            folder = std::filesystem::path(toWide(app.currentFile)).parent_path().wstring();
+        } else {
+            // An untitled note has no folder of its own: relative images
+            // resolve against the launch folder, as they did while the
+            // process still worked there (#253)
+            folder = launchDirectory();
+        }
+        widePath = (std::filesystem::path(folder) / wsrc).wstring();
+    }
+
+    // A document opens images on this computer and on the server it came
+    // from, never another computer's share: Windows would sign in to that
+    // server with the user's credentials. Decided before the cache, so a
+    // file another document was allowed to open does not show here either.
+    if (fromDocument && !isUrl && !qmd::mayOpenFromDocument(widePath, folder)) {
+        static App::ImageEntry blocked = [] {
+            App::ImageEntry entry;
+            entry.failed = true;
+            entry.blocked = true;
+            return entry;
+        }();
+        return blocked;
+    }
+
+    // A local image is cached as the file it resolves to: documents in two
+    // folders that both show "shot.png" each get their own
+    const std::string key = isUrl ? src : wideToUtf8(widePath);
+    auto it = app.imageCache.find(key);
     if (it != app.imageCache.end()) {
         app.touchImageCacheEntry(it->second);
         return it->second;
@@ -3016,15 +3228,10 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
     entry.failed = true;  // assume failure
 
     if (!app.wicFactory || !app.renderTarget) {
-        app.storeImageCacheEntry(src, std::move(entry));
-        return app.imageCache[src];
+        app.storeImageCacheEntry(key, std::move(entry));
+        return app.imageCache[key];
     }
 
-    std::wstring widePath;
-
-    // Remote images load on a worker thread — a synchronous download here
-    // stalled layout for seconds per unreachable URL (#44)
-    bool isUrl = (src.rfind("http://", 0) == 0 || src.rfind("https://", 0) == 0);
     if (isUrl) {
         entry.failed = false;
         entry.pending = true;
@@ -3040,21 +3247,6 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
             failed.failed = true;
         }
         return app.imageCache[src];
-    } else {
-        // Resolve relative to the current file's directory. Both strings are
-        // UTF-8 and must be widened explicitly: a narrow filesystem::path
-        // decodes through the ANSI codepage and mangles non-ASCII paths (#87)
-        std::wstring wsrc = toWide(src);
-        if (!app.currentFile.empty()) {
-            std::filesystem::path basePath(toWide(app.currentFile));
-            std::filesystem::path imgPath = basePath.parent_path() / wsrc;
-            widePath = imgPath.wstring();
-        } else {
-            // An untitled note has no folder of its own: relative images
-            // resolve against the launch folder, as they did while the
-            // process still worked there (#253)
-            widePath = (std::filesystem::path(launchDirectory()) / wsrc).wstring();
-        }
     }
 
     // SVG renders through Direct2D's SVG document support instead of WIC
@@ -3064,8 +3256,8 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
         if (lower.size() > 4 &&
             lower.compare(lower.size() - 4, 4, L".svg") == 0) {
             loadSvgBitmap(app, widePath, entry);
-            app.storeImageCacheEntry(src, std::move(entry));
-            return app.imageCache[src];
+            app.storeImageCacheEntry(key, std::move(entry));
+            return app.imageCache[key];
         }
     }
 
@@ -3074,16 +3266,16 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
                                  app.renderTarget->GetMaximumBitmapSize(), image)))
         createDecodedBitmap(app, image, entry);
 
-    app.storeImageCacheEntry(src, std::move(entry));
-    return app.imageCache[src];
+    app.storeImageCacheEntry(key, std::move(entry));
+    return app.imageCache[key];
 }
 
 static void layoutImage(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     auto& entry = getOrLoadImage(app, elem->url);
 
     if (entry.failed || !entry.bitmap) {
-        // Render alt text as placeholder
-        std::wstring altText = L"[image";
+        // Render alt text as placeholder, in the interface's language
+        std::wstring altText = std::wstring(L"[") + tr(app, "image.placeholder");
         std::wstring alt;
         std::function<void(const ElementPtr&)> extract = [&](const ElementPtr& e) {
             if (!e) return;
@@ -3093,6 +3285,11 @@ static void layoutImage(App& app, const ElementPtr& elem, float& y, float indent
         for (const auto& c : elem->children) extract(c);
         if (!alt.empty()) {
             altText += L": " + alt;
+        }
+        // An image left on another computer's share says why it is missing
+        if (entry.blocked) {
+            altText += L" \u2014 ";
+            altText += tr(app, "image.network_blocked");
         }
         altText += L"]";
 
@@ -3555,18 +3752,6 @@ static void layoutElement(App& app, const ElementPtr& elem, float& y, float inde
             // and inline elements (Text, Ruby, Link, etc.). Collect consecutive
             // inline children and render them through layoutInlineContent.
             std::vector<ElementPtr> inlineBuffer;
-            auto flushInline = [&]() {
-                if (pinAnchorsOnly(app, inlineBuffer, y)) {
-                    inlineBuffer.clear();
-                } else if (!inlineBuffer.empty()) {
-                    layoutInlineContent(app, inlineBuffer, indent, y, maxWidth,
-                                        app.textFormat, app.theme.text);
-                    app.docText += L"\n\n";
-                    float s = app.contentScale * app.zoomFactor;
-                    y += 14 * s;
-                    inlineBuffer.clear();
-                }
-            };
             for (const auto& child : elem->children) {
                 bool isBlock = (child->type == ElementType::Paragraph ||
                                 child->type == ElementType::Heading ||
@@ -3577,13 +3762,13 @@ static void layoutElement(App& app, const ElementPtr& elem, float& y, float inde
                                 child->type == ElementType::HtmlBlock ||
                                 child->type == ElementType::Table);
                 if (isBlock) {
-                    flushInline();
+                    layoutInlineRun(app, inlineBuffer, y, indent, maxWidth);
                     layoutElement(app, child, y, indent, maxWidth);
                 } else {
                     inlineBuffer.push_back(child);
                 }
             }
-            flushInline();
+            layoutInlineRun(app, inlineBuffer, y, indent, maxWidth);
             break;
         }
         default:

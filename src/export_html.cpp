@@ -9,6 +9,8 @@
 #include "editor.h"
 #include "file_utils.h"
 #include "i18n.h"
+#include "link_target.h"
+#include "network_path.h"
 #include "signals.h"
 #include "math_render.h"
 #include "mermaid.h"
@@ -1174,14 +1176,16 @@ void emitImage(ExportCtx& ctx, const ElementPtr& elem) {
     std::string src = elem->url;
     bool remote = src.rfind("http://", 0) == 0 || src.rfind("https://", 0) == 0;
     if (!remote) {
-        std::wstring widePath = toWide(src);
+        const std::string localPath = decodeLinkComponent(src);
+        std::wstring widePath = toWide(localPath);
         // Resolve relative to the document folder
         if (widePath.size() < 2 || widePath[1] != L':') {
             widePath = ctx.baseDir + L"\\" + widePath;
         }
         std::string data;
-        const char* mime = mimeForPath(src);
-        if (mime && readBinary(widePath, data)) {
+        const char* mime = mimeForPath(localPath);
+        // Another computer's share stays unopened, as in the viewer
+        if (mime && qmd::mayOpenFromDocument(widePath, ctx.baseDir) && readBinary(widePath, data)) {
             src = std::string("data:") + mime + ";base64," + base64(data);
         }
     }

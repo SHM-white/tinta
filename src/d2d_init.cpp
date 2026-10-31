@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <initializer_list>
 #include <string>
 
 // Older SDK headers may lack these
@@ -84,7 +85,10 @@ bool initD2D(App& app) {
 void applyTheme(App& app, int themeIndex) {
     if (themeIndex < 0 || themeIndex >= themeCount()) return;
 
-    const D2DTheme& newTheme = themeAt(themeIndex);
+    // In the faces it will draw with, so the check below compares like
+    // with like
+    D2DTheme newTheme = themeAt(themeIndex);
+    useInstalledFaces(app, newTheme);
 
     // If the fonts are unchanged the existing text formats are identical —
     // skip recreating ~47 IDWriteTextFormat objects. Colors are baked into
@@ -220,6 +224,22 @@ IDWriteFontFallback* createFontFallback(IDWriteFactory* factory, CjkOrder order,
             };
             builder->AddMapping(cjkRanges, 15, kCjkFamilies[order], 4);
 
+            // Signs Segoe UI Emoji maps to the wrong glyph go to faces that
+            // draw them first: it gave the square root the glyph of A with a
+            // tilde, infinity the degree sign's, and not-equal a soft
+            // hyphen's (#264)
+            if (emoji) {
+                const wchar_t* signFamilies[] = {
+                    L"Segoe UI", L"Segoe UI Symbol", L"Cambria Math"
+                };
+                DWRITE_UNICODE_RANGE signRanges[] = {
+                    { 0x02B0, 0x02FF },    // Spacing modifier letters (breve, dot above)
+                    { 0x2200, 0x22FF },    // Mathematical operators
+                    { 0xFB00, 0xFB06 },    // Latin ligatures (fi, fl)
+                };
+                builder->AddMapping(signRanges, 3, signFamilies, 3);
+            }
+
             // Emoji/symbol fallback for everything else
             if (emoji) {
                 const wchar_t* emojiFamilies[] = {
@@ -321,6 +341,45 @@ std::wstring documentCjkFamily(App& app, const wchar_t* family) {
     return face;
 }
 
+const wchar_t* installedFace(App& app, const wchar_t* face, bool mono) {
+    IDWriteFontCollection* fonts = nullptr;
+    if (!app.dwriteFactory || FAILED(app.dwriteFactory->GetSystemFontCollection(&fonts)) ||
+        !fonts) {
+        return face;
+    }
+    auto installed = [fonts](const wchar_t* name) {
+        UINT32 index = 0;
+        BOOL exists = FALSE;
+        return name && name[0] && SUCCEEDED(fonts->FindFamilyName(name, &index, &exists)) &&
+               exists;
+    };
+    // Nearest first; Consolas and Segoe UI come with every Windows
+    auto firstInstalled = [&](std::initializer_list<const wchar_t*> names) -> const wchar_t* {
+        for (const wchar_t* name : names) {
+            if (installed(name)) return name;
+        }
+        return nullptr;
+    };
+    const wchar_t* found = face;
+    if (!installed(face)) {
+        const wchar_t* standIn = mono
+            ? firstInstalled({L"Cascadia Mono", L"Cascadia Code", L"Consolas", L"Courier New"})
+            : firstInstalled({L"Segoe UI", L"Arial"});
+        if (standIn) found = standIn;
+    }
+    fonts->Release();
+    return found;
+}
+
+void useInstalledFaces(App& app, D2DTheme& theme) {
+    theme.fontFamily = installedFace(app, theme.fontFamily, false);
+    theme.codeFontFamily = installedFace(app, theme.codeFontFamily, true);
+    if (theme.headingFontFamily && theme.headingFontFamily[0] &&
+        installedFace(app, theme.headingFontFamily, false) != theme.headingFontFamily) {
+        theme.headingFontFamily = nullptr;
+    }
+}
+
 void updateTextFormats(App& app) {
     // Editor line layouts hold the old format/size
     app.clearEditorLineLayoutCache();
@@ -348,6 +407,13 @@ void updateTextFormats(App& app) {
     for (auto& fmt : app.headingScriptFormats) {
         if (fmt) { fmt->Release(); fmt = nullptr; }
     }
+
+    // Faces this PC lacks give way before any format takes them, here for
+    // the theme set at startup or for printing. With Cascadia Code missing,
+    // DirectWrite drew the editor and code blocks from the fallback list,
+    // whose emoji face showed the square root as A with a tilde (#264).
+    // Diagrams, exports and maths read the same faces from app.theme.
+    useInstalledFaces(app, app.theme);
 
     // Create text formats with current zoom and theme fonts
     float scale = app.contentScale * app.zoomFactor;
@@ -616,7 +682,9 @@ void ensureThemePreviewFormats(App& app) {
     float scale = app.contentScale;
     app.themePreviewFormats.resize(themeCount());
     for (int i = 0; i < themeCount(); i++) {
-        const D2DTheme& t = themeAt(i);
+        // In the faces the theme will draw with
+        D2DTheme t = themeAt(i);
+        useInstalledFaces(app, t);
         app.dwriteFactory->CreateTextFormat(t.fontFamily, nullptr,
             DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
             14.0f * scale, L"en-us", &app.themePreviewFormats[i].name);

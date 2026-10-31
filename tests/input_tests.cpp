@@ -183,6 +183,7 @@ int runSearchPanelTests();
 int runTableInputTests();
 int runDockedPreviewTests();
 int runTableLayoutTests();
+int runHighlightLayoutTests();
 int runWindowDragTests();
 int runSearchInputTests();
 int runWrappedCursorTests();
@@ -199,8 +200,10 @@ int runScrollSyncTests(const char* file);
 int runNotificationSettingTests();
 int runGotoLineTests(const char* file);
 int runReadingPositionTests(const char* file);
-int runSplitScrollbarTests(const char* file);
+int runSplitScrollbarTests(const char* file, const char* frontMatterFile);
+int runEditorDragTests(const char* file);
 int runTouchTests(const char* file);
+int runByteOrderMarkTests(const char* file, const char* frontMatterFile);
 
 int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--deleted-tab-tests") return runDeletedTabTests();
@@ -211,10 +214,15 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--notification-setting-tests") return runNotificationSettingTests();
     if (argc == 3 && std::string(argv[1]) == "--goto-line-tests") return runGotoLineTests(argv[2]);
     if (argc == 3 && std::string(argv[1]) == "--reading-position-tests") return runReadingPositionTests(argv[2]);
-    if (argc == 3 && std::string(argv[1]) == "--split-scrollbar-tests") return runSplitScrollbarTests(argv[2]);
+    if ((argc == 3 || argc == 4) && std::string(argv[1]) == "--split-scrollbar-tests")
+        return runSplitScrollbarTests(argv[2], argc == 4 ? argv[3] : nullptr);
     if (argc == 3 && std::string(argv[1]) == "--touch-tests") return runTouchTests(argv[2]);
+    if (argc == 3 && std::string(argv[1]) == "--editor-drag-tests") return runEditorDragTests(argv[2]);
+    if (argc == 4 && std::string(argv[1]) == "--byte-order-mark-tests")
+        return runByteOrderMarkTests(argv[2], argv[3]);
     if (argc == 2 && std::string(argv[1]) == "--window-drag-tests") return runWindowDragTests();
     if (argc == 2 && std::string(argv[1]) == "--table-layout-tests") return runTableLayoutTests();
+    if (argc == 2 && std::string(argv[1]) == "--highlight-layout-tests") return runHighlightLayoutTests();
     if (argc == 2 && std::string(argv[1]) == "--table-input-tests") return runTableInputTests();
     if (argc == 2 && std::string(argv[1]) == "--docked-preview-tests") return runDockedPreviewTests();
     if (argc == 2 && std::string(argv[1]) == "--editor-context-tests") return runEditorContextTests();

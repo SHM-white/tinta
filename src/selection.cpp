@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace {
 
@@ -249,6 +250,11 @@ static std::wstring hrefAttribute(const std::string& url) {
     return out;
 }
 
+// Lists and their items add no space of their own: Word and Outlook put a
+// gap above and below each list, on top of the empty lines the copy keeps,
+// and a task line split its list into separately spaced pieces
+static const wchar_t kListNoMargins[] = L" style=\"margin-top:0;margin-bottom:0\"";
+
 std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end) {
     start = std::min(start, app.docText.size());
     end = std::min(end, app.docText.size());
@@ -264,6 +270,111 @@ std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end) {
         if (boldToo && inBold) { html += L"</b>"; inBold = false; }
         if (linkToo && inLink) { html += L"</a>"; inLink = nullptr; }
     };
+    // List lines paste as real lists: the items whose <li> is open, outermost
+    // first, each inside its open <ul> or <ol>
+    std::vector<const App::DocListItem*> openItems;
+    auto closeListsFrom = [&](size_t level) {
+        while (openItems.size() > level) {
+            html += openItems.back()->ordered ? L"</li></ol>\r\n" : L"</li></ul>\r\n";
+            openItems.pop_back();
+        }
+    };
+    // Makes the open items chain, whose first `same` are open already. A
+    // list split by a task line reopens at its next item's number.
+    auto openItemsFor = [&](const std::vector<const App::DocListItem*>& chain, size_t same) {
+        closeListsFrom(same + 1);
+        // The next item of the same list closes only the previous item
+        bool sibling = false;
+        if (openItems.size() > same) {
+            sibling = same < chain.size() && openItems[same]->list == chain[same]->list;
+            if (sibling) {
+                html += L"</li>\r\n";
+                openItems.pop_back();
+            } else {
+                closeListsFrom(same);
+            }
+        }
+        for (size_t level = openItems.size(); level < chain.size(); level++) {
+            const App::DocListItem* item = chain[level];
+            if (!(sibling && level == same)) {
+                if (item->ordered) {
+                    html += L"<ol";
+                    if (item->number != 1) html += L" start=\"" + std::to_wstring(item->number) + L"\"";
+                } else {
+                    html += L"<ul";
+                }
+                html += kListNoMargins;
+                html += L">";
+            }
+            html += L"<li";
+            html += kListNoMargins;
+            html += L">";
+            openItems.push_back(item);
+        }
+    };
+    // A line is a <div> or <p> (lineEnd closes it) or part of an open <li>.
+    // listContext: the last line was a list line. The empty lines after it
+    // wait in blankAfterList: they go between the items of one list, and
+    // stand as one empty line before anything else, like the one before.
+    const wchar_t* lineEnd = nullptr;
+    bool listContext = false;
+    bool blankAfterList = false;
+    const void* lastList = nullptr;  // the outermost list of the last list line
+    auto leaveLists = [&]() {
+        closeListsFrom(0);
+        if (blankAfterList) html += L"<div><br></div>\r\n";
+        blankAfterList = false;
+    };
+    const App::DocListItem* marked = nullptr;  // the last item given a text marker
+    // Opens the line at i: a <div>, or the <li> of the list item around it
+    // (an empty item counts as around its own position)
+    auto openLine = [&](size_t i) {
+        std::vector<const App::DocListItem*> chain;  // items around i, outermost first
+        for (const App::DocListItem& item : app.docListItems) {
+            if (item.start > i) break;
+            if (i < item.end || item.start == i) chain.push_back(&item);
+        }
+        // From a task item in, lines paste as indented paragraphs with the
+        // marker as text: Word bullets every list item whatever its style,
+        // which put a bullet before each checkbox
+        size_t firstTask = 0;
+        while (firstTask < chain.size() && !chain[firstTask]->task) firstTask++;
+        std::vector<const App::DocListItem*> asText(chain.begin() + firstTask, chain.end());
+        chain.resize(firstTask);
+        listContext = !chain.empty() || !asText.empty();
+        if (!listContext) {
+            leaveLists();
+            lastList = nullptr;
+            html += L"<div>";
+            lineEnd = L"</div>";
+            return;
+        }
+        // Another list, even right after one, stands apart as on screen
+        const void* list = (chain.empty() ? asText.front() : chain.front())->list;
+        if (list != lastList) leaveLists();
+        blankAfterList = false;
+        lastList = list;
+        size_t same = 0;
+        while (same < openItems.size() && same < chain.size() && openItems[same] == chain[same])
+            same++;
+        if (same == chain.size() && same == openItems.size()) {
+            if (asText.empty()) html += L"<br>";  // another line of the same item
+        } else {
+            openItemsFor(chain, same);
+        }
+        if (!asText.empty()) {
+            // A <p>: Word drops a <div>'s margin, so the line lost its indent
+            html += L"<p style=\"margin:0 0 0 " + std::to_wstring(36 * asText.size()) + L"pt\">";
+            lineEnd = L"</p>";
+            const App::DocListItem* item = asText.back();
+            if (item != marked) {
+                marked = item;
+                if (item->task) html += item->task == 2 ? L"\u2611 " : L"\u2610 ";
+                else if (item->ordered) html += std::to_wstring(item->number) + L". ";
+                else html += L"\u2022 ";
+            }
+        }
+    };
     bool inLine = false;
     bool lineStart = true;
     for (size_t i = start; i < end; i++) {
@@ -274,15 +385,30 @@ std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end) {
         if (c == L'\r') continue;
         // Each line is a <div>, so Word and Outlook paste a paragraph per
         // line as they do the plain text (with <br> the whole copy became
-        // one paragraph); what is open closes with its line
+        // one paragraph); what is open closes with its line. Inside a list
+        // a line belongs to its <li>, and the empty lines between items go.
         if (c == L'\n') {
             closeFrom(true, true, true);
-            html += inLine ? L"</div>\r\n" : L"<div><br></div>\r\n";
+            // An empty item has no character to open it: open it at its line
+            if (!inLine) {
+                for (const App::DocListItem& item : app.docListItems) {
+                    if (item.start > i) break;
+                    if (item.start == i && item.end == i) { openLine(i); inLine = true; break; }
+                }
+            }
+            if (lineEnd) {
+                html += lineEnd;
+                html += L"\r\n";
+                lineEnd = nullptr;
+            } else if (!inLine) {
+                if (listContext) blankAfterList = true;
+                else html += L"<div><br></div>\r\n";
+            }
             inLine = false;
             lineStart = true;
             continue;
         }
-        if (!inLine) { html += L"<div>"; inLine = true; }
+        if (!inLine) { openLine(i); inLine = true; }
         const App::DocLinkRange* wantLink =
             link != app.docLinkRanges.end() && link->start <= i ? &*link : nullptr;
         bool wantBold = bold != app.docBoldRanges.end() && bold->first <= i;
@@ -316,7 +442,8 @@ std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end) {
         lineStart = false;
     }
     closeFrom(true, true, true);
-    if (inLine) html += L"</div>";
+    if (lineEnd) html += lineEnd;
+    closeListsFrom(0);
     return html;
 }
 

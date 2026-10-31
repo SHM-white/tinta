@@ -2004,6 +2004,7 @@ void renderHelpOverlay(App& app) {
         {L"Alt+\x2191 / Alt+\x2193", tr(app, "help.edit.move_line")},
         {L"Ctrl+Alt+\x2191 / \x2193", tr(app, "help.edit.add_caret")},
         {L"Alt+Click",    tr(app, "help.edit.alt_click")},
+        {L"Drag / Ctrl+Drag", tr(app, "help.edit.drag_text")},
         {L"Ctrl+D",       tr(app, "help.edit.next_match")},
     };
 
@@ -3896,12 +3897,15 @@ void renderThemeEditor(App& app) {
         app.renderTarget->DrawRoundedRectangle(
             D2D1::RoundedRect(spec, dpi(app, 8.0f), dpi(app, 8.0f)), app.brush, 1.0f);
 
-        const wchar_t* fam = app.themeEditorFont.empty()
-            ? L"Segoe UI" : app.themeEditorFont.c_str();
-        const wchar_t* headingFam = app.themeEditorHeadingFont.empty()
-            ? fam : app.themeEditorHeadingFont.c_str();
-        const wchar_t* codeFam = app.themeEditorCodeFont.empty()
-            ? L"Consolas" : app.themeEditorCodeFont.c_str();
+        // A face this PC lacks shows as the one the theme will draw with:
+        // a stand-in, or for headings the body's
+        const wchar_t* fam = installedFace(app, app.themeEditorFont.empty()
+            ? L"Segoe UI" : app.themeEditorFont.c_str(), false);
+        const wchar_t* heading = app.themeEditorHeadingFont.c_str();
+        const wchar_t* headingFam =
+            heading[0] && installedFace(app, heading, false) == heading ? heading : fam;
+        const wchar_t* codeFam = installedFace(app, app.themeEditorCodeFont.empty()
+            ? L"Consolas" : app.themeEditorCodeFont.c_str(), true);
         IDWriteTextFormat* h = nullptr; IDWriteTextFormat* b = nullptr;
         IDWriteTextFormat* m = nullptr;
         app.dwriteFactory->CreateTextFormat(headingFam, nullptr, DWRITE_FONT_WEIGHT_BOLD,

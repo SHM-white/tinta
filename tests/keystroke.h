@@ -91,6 +91,21 @@ inline bool keystroke(App& app, unsigned vk, KeyMods mods = {}, wchar_t characte
     return consumed;
 }
 
+// Modifiers held through mouse input, as a hand holds Ctrl or Shift while
+// it clicks or drags: the mouse handlers read them with GetKeyState
+template <typename Action>
+inline void withKeysHeld(KeyMods mods, Action action) {
+    BYTE original[256], held[256];
+    GetKeyboardState(original);
+    std::memcpy(held, original, sizeof held);
+    held[VK_CONTROL] = mods.ctrl ? 0x80 : 0;
+    held[VK_SHIFT] = mods.shift ? 0x80 : 0;
+    held[VK_MENU] = mods.alt ? 0x80 : 0;
+    SetKeyboardState(held);
+    action();
+    SetKeyboardState(original);
+}
+
 // Typed text, each character a whole keystroke on the US layout's key for
 // it, with Shift where that layout needs it. Characters the layout has no
 // key for come as VK_PACKET, as injected and composed text does.

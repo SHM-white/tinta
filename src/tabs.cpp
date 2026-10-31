@@ -88,6 +88,7 @@ void parkActiveEditBuffer(App& app) {
     tab.editMode = true;
     tab.editorDirty = app.editorDirty;
     tab.editorText = std::move(app.editorText);
+    tab.editorBom = app.editorBom;
     tab.editorScrollY = app.editorScrollY;
     tab.editorCursor = app.editorCursorPos;
     tab.wordWrap = app.editorWordWrap;
@@ -220,7 +221,7 @@ void tabActivate(App& app, HWND hwnd, int index) {
     if (tab.editMode) {
         app.editorWordWrap = tab.wordWrap;
         restoreEditBuffer(app, tab.editorText, tab.editorDirty,
-                          tab.editorScrollY, tab.editorCursor);
+                          tab.editorScrollY, tab.editorCursor, tab.editorBom);
         tab.editorText.clear();  // ownership moved back to the app
     }
     app.showTabSwitcher = false;

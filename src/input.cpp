@@ -1,6 +1,7 @@
 #include "frontmatter_ui.h"
 #include "input.h"
 #include "link_target.h"
+#include "network_path.h"
 #include "annotations.h"
 #include "drafts.h"
 #include "editrail.h"
@@ -323,6 +324,7 @@ bool openDocumentSourceInViewer(App& app, const std::wstring& fullPath,
     app.docBoldRanges.clear();
     app.docItalicRanges.clear();
     app.docLinkRanges.clear();
+    app.docListItems.clear();
     app.searchMatches.clear();
     clearSelection(app);  // offsets belong to the old docText
     app.layoutDirty = true;
@@ -1149,13 +1151,20 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
         return;
     }
 
+    // A dragged editor selection owns the pointer wherever it goes, over
+    // the tab strip or the search bar too (#289)
+    if (app.editMode && app.editorTextDrag.armed) {
+        handleEditorMouseMove(app, hwnd, app.mouseX, app.mouseY);
+        return;
+    }
+
     bool iconHover = appMenuButtonAt(app, (float)app.mouseX, (float)app.mouseY);
     if (iconHover != app.appMenuHover) {
         app.appMenuHover = iconHover;
         InvalidateRect(hwnd, nullptr, FALSE);
     }
     if (iconHover && appMenuAvailable(app) && app.tabDragIndex < 0 &&
-        !app.editorSelecting && !app.draggingSeparator && !app.selecting) {
+        !app.editorSelecting && !app.editorTextDrag.armed && !app.draggingSeparator && !app.selecting) {
         SetCursor(cursorHand);
         return;
     }
@@ -1421,7 +1430,7 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
         // Replace-bar controls override the pane cursor: hand over the
         // buttons, text beam over the two input fields (#119 feedback)
         if (app.showSearch && app.searchReplaceMode &&
-            !app.draggingSeparator && !app.editorSelecting) {
+            !app.draggingSeparator && !app.editorSelecting && !app.editorTextDrag.armed) {
             static HCURSOR replaceIBeam = LoadCursor(nullptr, IDC_IBEAM);
             for (const auto& hit : app.searchReplaceHits) {
                 if ((float)app.mouseX >= hit.first.left &&
@@ -1435,7 +1444,7 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
         }
         // If mouse is in the preview pane and not dragging separator, fall through for link hover etc.
         if ((float)app.mouseX < documentViewportX(app) ||
-            app.draggingSeparator || app.editorSelecting) return;
+            app.draggingSeparator || app.editorSelecting || app.editorTextDrag.armed) return;
         // Quick-note empty state: hover feedback for the Open button
         if (quickNoteEmptyStateActive(app) && app.editorShowPreview) {
             const D2D1_RECT_F& r = app.quickNoteButtonRect;
@@ -2385,8 +2394,11 @@ static bool openWikiLink(App& app, const std::string& target) {
     std::wstring wideTarget = toWide(target);
     fs::path dir = fs::path(toWide(app.currentFile)).parent_path();
 
+    // A wiki link names a note; one that reaches another computer's share
+    // is not looked up (network_path.h)
     auto tryOpen = [&](const fs::path& p) {
-        return fs::exists(p, ec) && !fs::is_directory(p, ec) &&
+        return qmd::mayOpenFromDocument(p.wstring(), dir.wstring()) &&
+               fs::exists(p, ec) && !fs::is_directory(p, ec) &&
                openDocumentInViewer(app, p.wstring());
     };
     if (tryOpen(dir / wideTarget)) return true;
@@ -2841,6 +2853,13 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         return;
     }
     // A tab drag ends on release (its press already consumed the click)
+    // A dragged editor selection lands, or a click on it places the caret,
+    // while the press still holds the mouse: losing it cancels the drag
+    // (#289)
+    if (app.editMode && app.editorTextDrag.armed) {
+        handleEditorMouseUp(app, hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        return;
+    }
     if (app.tabDragIndex >= 0) {
         tabDragEnd(app, hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
     }
@@ -3561,6 +3580,12 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
     }
     if (app.panelScrollbarDrag.list != PanelList::None) {
         if (wParam == VK_ESCAPE) panelScrollbarEnd(app, hwnd, true);
+        return true;
+    }
+    // A dragged selection (#289): Esc puts it back as it was, and other
+    // keys wait for the release
+    if (app.editorTextDrag.armed) {
+        if (wParam == VK_ESCAPE) editorTextDragCancel(app, hwnd);
         return true;
     }
     float pageSize = app.height * 0.8f;
@@ -4448,11 +4473,15 @@ void handleLinkPeekTimer(App& app, HWND hwnd) {
                !app.currentFile.empty()) {
         std::wstring t = toWide(app.linkPeekUrl.substr(5));
         fs::path dir = fs::path(toWide(app.currentFile)).parent_path();
-        if (fs::exists(dir / t, ec)) {
+        // Hovering never reaches another computer's share (network_path.h)
+        auto found = [&](const fs::path& p) {
+            return qmd::mayOpenFromDocument(p.wstring(), dir.wstring()) && fs::exists(p, ec);
+        };
+        if (found(dir / t)) {
             target = dir / t;
-        } else if (fs::exists(dir / (t + L".md"), ec)) {
+        } else if (found(dir / (t + L".md"))) {
             target = dir / (t + L".md");
-        } else if (fs::exists(dir / (t + L".markdown"), ec)) {
+        } else if (found(dir / (t + L".markdown"))) {
             target = dir / (t + L".markdown");
         }
     }
