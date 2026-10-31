@@ -917,6 +917,7 @@ struct App {
         TouchTarget target = TouchTarget::None;
         PanelList list = PanelList::None;
         POINT start{}, last{};
+        size_t editorWordStart = 0, editorWordEnd = 0;
         int axis = 0;  // while panning: 1 vertical, 2 horizontal
         float originX = 0, originY = 0;
         struct Sample { double ms; float x, y; };
