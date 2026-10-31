@@ -283,6 +283,8 @@ int runTouchTests(const char* path) {
     app.hwnd = CreateWindowExW(0, L"STATIC", L"Touch tests", WS_POPUP, 0, 0, 1050, 800,
                                nullptr, nullptr, nullptr, nullptr);
     if (!app.hwnd || !initD2D(app) || !createRenderTarget(app)) return 2;
+    check(!requestTouchKeyboard(nullptr), "a missing window never requests the system keyboard");
+    check(!requestTouchKeyboard(app.hwnd), "a hidden test window cannot take over the system keyboard");
     Settings settings;
     settings.keyProfile = "windows";
     applyKeymap(app, settings);

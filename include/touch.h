@@ -35,4 +35,8 @@ TouchTarget touchTargetAt(const App& app, POINT pt, PanelList& list);
 // The clock pointer messages and the fling run on, in milliseconds
 double touchClockMs();
 
+// Best-effort Windows InputPane request for a foreground desktop window.
+// No executable launch or toggle: unavailable services leave input unchanged.
+bool requestTouchKeyboard(HWND hwnd);
+
 #endif  // TINTA_TOUCH_H

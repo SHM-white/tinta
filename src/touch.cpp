@@ -11,6 +11,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <inputpaneinterop.h>
+#include <windows.ui.viewmanagement.h>
+#include <wrl/client.h>
+#include <wrl/wrappers/corewrappers.h>
 
 namespace {
 
@@ -156,6 +160,14 @@ void tap(App& app, HWND hwnd, POINT pt, double ms, TouchTarget target) {
     t.tapMs = ms;
     t.tapTarget = target;
     click(app, hwnd, at);
+    // Only a finger's deliberate caret placement asks for text input.
+    // Mouse/pen clicks, panning, held selections and repeated taps do not.
+    if (target == TouchTarget::Editor && !again && app.editMode &&
+        !app.editorReadingPreview && !app.editorHasSelection &&
+        !app.showSearch && !app.editCtxOpen && !app.confirmExitPending) {
+        editorPositionImeWindow(app, hwnd);
+        requestTouchKeyboard(hwnd);
+    }
 }
 
 // The finger's speed over its last moves before it lifted at `ms`, in
@@ -216,6 +228,26 @@ double touchClockMs() {
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     return static_cast<double>(now.QuadPart) / perMs;
+}
+
+bool requestTouchKeyboard(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd) || !IsWindowVisible(hwnd) ||
+        GetForegroundWindow() != GetAncestor(hwnd, GA_ROOT)) return false;
+    // Tinta draws its own editor, so Windows has no native EDIT control
+    // to detect. Use the documented desktop InputPane interop instead.
+    Microsoft::WRL::Wrappers::RoInitializeWrapper runtime(RO_INIT_SINGLETHREADED);
+    if (FAILED(runtime)) return false;
+    Microsoft::WRL::ComPtr<IInputPaneInterop> factory;
+    HRESULT hr = RoGetActivationFactory(
+        Microsoft::WRL::Wrappers::HStringReference(RuntimeClass_Windows_UI_ViewManagement_InputPane).Get(),
+        IID_PPV_ARGS(&factory));
+    if (FAILED(hr)) return false;
+    Microsoft::WRL::ComPtr<ABI::Windows::UI::ViewManagement::IInputPane2> pane;
+    hr = factory->GetForWindow(GetAncestor(hwnd, GA_ROOT), IID_PPV_ARGS(&pane));
+    if (FAILED(hr)) return false;
+    SetFocus(hwnd);
+    boolean accepted = false;
+    return SUCCEEDED(pane->TryShow(&accepted)) && accepted;
 }
 
 TouchTarget touchTargetAt(const App& app, POINT pt, PanelList& list) {
