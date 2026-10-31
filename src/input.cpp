@@ -2135,8 +2135,12 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
     // The search bar's results button and the results panel (#246)
     if (searchPanelMouseDown(app, hwnd, static_cast<float>(GET_X_LPARAM(lParam)),
                              static_cast<float>(GET_Y_LPARAM(lParam)))) return;
+    // Search fields retain Windows' mouse promotion. Read its device source
+    // before focus/capture changes; mouse, pen and unknown input stay unchanged.
+    INPUT_MESSAGE_SOURCE source{};
+    const bool fromTouch = GetCurrentInputMessageSource(&source) && source.deviceType == IMDT_TOUCH;
     if (searchInputMouseDown(app, hwnd, static_cast<float>(GET_X_LPARAM(lParam)),
-                             static_cast<float>(GET_Y_LPARAM(lParam)))) return;
+                             static_cast<float>(GET_Y_LPARAM(lParam)), fromTouch)) return;
 
     if (sidePanelResizeBegin(app, hwnd, static_cast<float>(GET_X_LPARAM(lParam)),
                             static_cast<float>(GET_Y_LPARAM(lParam)))) return;

@@ -16,7 +16,7 @@ void focusSourceEditor(App& app);
 bool sourceEditorHasFocus(const App& app);
 bool searchInputKeyDown(App& app, HWND hwnd, WPARAM key);
 void searchInputChar(App& app, HWND hwnd, wchar_t ch);
-bool searchInputMouseDown(App& app, HWND hwnd, float x, float y);
+bool searchInputMouseDown(App& app, HWND hwnd, float x, float y, bool fromTouch = false);
 bool searchInputMouseMove(App& app, float x, float y);
 void searchInputMouseUp(App& app);
 void renderSearchField(App& app, int field, const D2D1_RECT_F& textRect,

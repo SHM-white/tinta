@@ -3,6 +3,7 @@
 #include "editor.h"
 #include "input.h"
 #include "tableedit.h"
+#include "touch.h"
 #include "utils.h"
 #include <algorithm>
 #include <cwctype>
@@ -253,7 +254,7 @@ void searchInputChar(App& app, HWND hwnd, wchar_t ch) {
         InvalidateRect(hwnd, nullptr, FALSE);
     }
 }
-bool searchInputMouseDown(App& app, HWND hwnd, float x, float y) {
+bool searchInputMouseDown(App& app, HWND hwnd, float x, float y, bool fromTouch) {
     if (!app.showSearch) return false;
     if (app.editMode && app.searchReplaceMode) {
         for (const auto& hit : app.searchReplaceHits) {
@@ -274,6 +275,10 @@ bool searchInputMouseDown(App& app, HWND hwnd, float x, float y) {
         app.searchSelectingField = field;
         SetCapture(hwnd);
         InvalidateRect(hwnd, nullptr, FALSE);
+        if (fromTouch) {
+            editorPositionImeWindow(app, hwnd);
+            requestTouchKeyboard(hwnd);
+        }
         return true;
     }
     return false;
