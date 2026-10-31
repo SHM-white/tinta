@@ -128,6 +128,47 @@ void fieldEditing(App& app) {
     key(app, VK_ESCAPE, 27);
     check(!app.showSearch && sourceEditorHasFocus(app), "Escape returns typing to source");
 }
+void touchFields(App& app) {
+    const auto source = app.editorText;
+    key(app, 'H', 8, true);
+    for (int width : {650, 1050}) for (float scale : {1.0f, 1.5f}) {
+        app.width = width; app.contentScale = scale;
+        paint(app);
+        for (int field : {0, 1}) {
+            releaseSearchInput(app);
+            const auto rect = app.searchFields[field].textRect;
+            check(searchInputMouseDown(app, app.hwnd, rect.left, rect.top + 2, true),
+                  "touch press is handled by the chosen search field");
+            check(app.searchActive && app.replaceFieldActive == (field == 1) &&
+                      app.searchFields[field].caret == 0 && app.searchSelectingField == field,
+                  "touch places the Find/Replace caret before requesting the keyboard");
+            searchInputMouseUp(app);
+            check(app.searchSelectingField == -1 && GetCapture() != app.hwnd,
+                  "touch field selection releases capture");
+            const auto before = field ? app.replaceText : app.searchQuery;
+            type(app, L"Z");
+            check((field ? app.replaceText : app.searchQuery) == L"Z" + before &&
+                      app.editorText == source,
+                  "typing after a touch edits only the chosen field");
+        }
+        check(!searchInputMouseDown(app, app.hwnd, -20, -20, true),
+              "a touch outside the inputs is not consumed as a field press");
+    }
+    app.width = 1050; app.contentScale = 1;
+    closeSearchInput(app);
+    check(!searchInputMouseDown(app, app.hwnd, 0, 0, true), "hidden Find ignores touch input");
+    exitEditMode(app);
+    key(app, 'F', 6, true);
+    paint(app);
+    const auto rect = app.searchFields[0].textRect;
+    check(searchInputMouseDown(app, app.hwnd, rect.left, rect.top + 2, true) &&
+              app.searchActive && !app.editMode, "viewer Find accepts touch without entering editing");
+    searchInputMouseUp(app);
+    closeSearchInput(app);
+    enterEditMode(app);
+    // The hidden harness window deliberately cannot show the actual InputPane.
+    // Windows promotion and visible keyboard behavior require the device fixture.
+}
 void focusTransfers(App& app) {
     auto reset = [&]() {
         closeSearchInput(app); tableEditCancel(app);
@@ -213,7 +254,7 @@ int runSearchInputTests() {
     Settings settings; settings.keyProfile="windows"; applyKeymap(app,settings);
     enterEditMode(app); editorReparse(app); ensureLayoutComplete(app);
     check(app.tableCellRects.size()==6 && app.codeBlocks.size()==1, "mixed fixture lays out its table and code");
-    fieldEditing(app); focusTransfers(app);
+    fieldEditing(app); touchFields(app); focusTransfers(app);
     DestroyWindow(app.hwnd); app.hwnd=nullptr; state.reset(); CoUninitialize();
     OleUninitialize();
     std::cout << "Search input: " << failures << " failures\n";
