@@ -1,5 +1,10 @@
 // Touch (#286): a finger pans instead of selecting, taps click, and a held
 // press selects. Suggested by @SHM-white. See touch.h.
+// Include WinRT before app.h imports qmd names (including Color).
+#include <inputpaneinterop.h>
+#include <windows.ui.viewmanagement.h>
+#include <wrl/client.h>
+#include <wrl/wrappers/corewrappers.h>
 #include "touch.h"
 
 #include "editor.h"
@@ -11,10 +16,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <inputpaneinterop.h>
-#include <windows.ui.viewmanagement.h>
-#include <wrl/client.h>
-#include <wrl/wrappers/corewrappers.h>
 
 namespace {
 
